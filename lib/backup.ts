@@ -1,9 +1,12 @@
+import type { RuleKind, SavingsTargetMode, TargetKind } from "./finance-core/allocation";
 import type { TxType } from "./finance-core/ledger";
 import type { Piasters } from "./finance-core/money";
 
 // Pure: no React, Next.js or database imports. The enum lists below mirror db/schema.ts (backup.test.ts checks they match).
 
-export const BACKUP_VERSION = 1;
+export const BACKUP_VERSION = 2;
+// Version 1 files (no goals, rules or savings settings) still restore.
+const OLDEST_VERSION = 1;
 
 export const ACCOUNT_TYPES = ["bank", "cash", "wallet", "brokerage", "savings", "credit_card", "receivable", "other"] as const;
 export const CATEGORY_KINDS = ["income", "expense"] as const;
@@ -19,6 +22,13 @@ export const TX_TYPES = [
   "ADJUSTMENT",
 ] as const satisfies readonly TxType[];
 export const TX_STATUSES = ["pending", "posted", "void"] as const;
+export const SAVINGS_MODES = ["fixed", "percentage", "flexible"] as const satisfies readonly SavingsTargetMode[];
+export const RULE_KINDS = ["fixed", "percentage", "remainder"] as const satisfies readonly RuleKind[];
+export const TARGET_KINDS = ["goal", "investments", "cash"] as const satisfies readonly TargetKind[];
+
+// Postgres limits behind the checks below: integer columns hold up to 2^31-1, numeric(8,6) rates stay under 100.
+const INT4_MAX = 2_147_483_647;
+const RATE_LIMIT = 100;
 
 type AccountType = (typeof ACCOUNT_TYPES)[number];
 type CategoryKind = (typeof CATEGORY_KINDS)[number];
@@ -66,37 +76,130 @@ export type BackupTransaction = {
   createdAt: string;
 };
 
+export type BackupSettings = {
+  monthStartDay: number;
+  savingsTargetMode: SavingsTargetMode;
+  savingsTargetAmount: Piasters | null;
+  /** Decimal: 0.2 = 20%. */
+  savingsTargetPercent: number | null;
+  expectedMonthlyIncome: Piasters | null;
+  expectedMonthlySpending: Piasters | null;
+};
+
+export type BackupGoal = {
+  id: string;
+  name: string;
+  targetAmount: Piasters;
+  targetDate: string;
+  startDate: string;
+  priority: number;
+  plannedMonthly: Piasters | null;
+  /** Decimal: 0.12 = 12%. */
+  expectedReturnOverride: number | null;
+  manualCurrent: Piasters | null;
+  notes: string | null;
+  color: string | null;
+  icon: string | null;
+  archivedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type BackupGoalAllocation = {
+  id: string;
+  goalId: string;
+  accountId: string;
+  amount: Piasters;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type BackupGoalAllocationEvent = {
+  id: string;
+  goalId: string;
+  accountId: string;
+  delta: Piasters;
+  date: string;
+  note: string | null;
+  createdAt: string;
+};
+
+export type BackupAllocationRule = {
+  id: string;
+  kind: RuleKind;
+  targetKind: TargetKind;
+  goalId: string | null;
+  amount: Piasters | null;
+  /** Decimal: 0.25 = 25%. */
+  percent: number | null;
+  createdAt: string;
+};
+
+export type BackupAllocationOverride = {
+  id: string;
+  ruleId: string;
+  month: string; // YYYY-MM, start month of the financial month
+  amount: Piasters;
+  createdAt: string;
+};
+
 export type Backup = {
   version: typeof BACKUP_VERSION;
   exportedAt: string;
-  settings: { monthStartDay: number };
+  settings: BackupSettings;
   accounts: BackupAccount[];
   categories: BackupCategory[];
   transactions: BackupTransaction[];
+  goals: BackupGoal[];
+  goalAllocations: BackupGoalAllocation[];
+  goalAllocationEvents: BackupGoalAllocationEvent[];
+  allocationRules: BackupAllocationRule[];
+  allocationOverrides: BackupAllocationOverride[];
 };
 
+// Database rows carry Date timestamps, and numeric rates may arrive as strings from the driver.
 type Dated<T, K extends keyof T> = Omit<T, K> & { [P in K]: null extends T[P] ? Date | null : Date };
+type Rated<T, K extends keyof T> = Omit<T, K> & { [P in K]: number | string | null };
 type AccountRow = Dated<BackupAccount, "archivedAt" | "createdAt" | "updatedAt">;
 type CategoryRow = Dated<BackupCategory, "archivedAt" | "createdAt">;
 type TransactionRow = Dated<BackupTransaction, "voidedAt" | "createdAt">;
+type SettingsRow = Rated<BackupSettings, "savingsTargetPercent">;
+type GoalRow = Rated<Dated<BackupGoal, "archivedAt" | "createdAt" | "updatedAt">, "expectedReturnOverride">;
+type GoalAllocationRow = Dated<BackupGoalAllocation, "createdAt" | "updatedAt">;
+type GoalAllocationEventRow = Dated<BackupGoalAllocationEvent, "createdAt">;
+type AllocationRuleRow = Rated<Dated<BackupAllocationRule, "createdAt">, "percent">;
+type AllocationOverrideRow = Dated<BackupAllocationOverride, "createdAt">;
 
 const iso = (d: Date) => d.toISOString();
 const isoOrNull = (d: Date | null) => (d ? d.toISOString() : null);
+const numOrNull = (v: number | string | null) => (v === null ? null : Number(v));
 
 /** Database rows (Date timestamps, with user_id) to the backup shape. Fields are copied by name, so user_id never leaks in. */
 export function serializeBackup(
   rows: {
-    settings: { monthStartDay: number };
+    settings: SettingsRow;
     accounts: AccountRow[];
     categories: CategoryRow[];
     transactions: TransactionRow[];
+    goals: GoalRow[];
+    goalAllocations: GoalAllocationRow[];
+    goalAllocationEvents: GoalAllocationEventRow[];
+    allocationRules: AllocationRuleRow[];
+    allocationOverrides: AllocationOverrideRow[];
   },
   exportedAt: Date = new Date(),
 ): Backup {
   return {
     version: BACKUP_VERSION,
     exportedAt: iso(exportedAt),
-    settings: { monthStartDay: rows.settings.monthStartDay },
+    settings: {
+      monthStartDay: rows.settings.monthStartDay,
+      savingsTargetMode: rows.settings.savingsTargetMode,
+      savingsTargetAmount: rows.settings.savingsTargetAmount,
+      savingsTargetPercent: numOrNull(rows.settings.savingsTargetPercent),
+      expectedMonthlyIncome: rows.settings.expectedMonthlyIncome,
+      expectedMonthlySpending: rows.settings.expectedMonthlySpending,
+    },
     accounts: rows.accounts.map((a) => ({
       id: a.id,
       name: a.name,
@@ -134,6 +237,56 @@ export function serializeBackup(
       replacesId: t.replacesId,
       voidedAt: isoOrNull(t.voidedAt),
       createdAt: iso(t.createdAt),
+    })),
+    goals: rows.goals.map((g) => ({
+      id: g.id,
+      name: g.name,
+      targetAmount: g.targetAmount,
+      targetDate: g.targetDate,
+      startDate: g.startDate,
+      priority: g.priority,
+      plannedMonthly: g.plannedMonthly,
+      expectedReturnOverride: numOrNull(g.expectedReturnOverride),
+      manualCurrent: g.manualCurrent,
+      notes: g.notes,
+      color: g.color,
+      icon: g.icon,
+      archivedAt: isoOrNull(g.archivedAt),
+      createdAt: iso(g.createdAt),
+      updatedAt: iso(g.updatedAt),
+    })),
+    goalAllocations: rows.goalAllocations.map((a) => ({
+      id: a.id,
+      goalId: a.goalId,
+      accountId: a.accountId,
+      amount: a.amount,
+      createdAt: iso(a.createdAt),
+      updatedAt: iso(a.updatedAt),
+    })),
+    goalAllocationEvents: rows.goalAllocationEvents.map((e) => ({
+      id: e.id,
+      goalId: e.goalId,
+      accountId: e.accountId,
+      delta: e.delta,
+      date: e.date,
+      note: e.note,
+      createdAt: iso(e.createdAt),
+    })),
+    allocationRules: rows.allocationRules.map((r) => ({
+      id: r.id,
+      kind: r.kind,
+      targetKind: r.targetKind,
+      goalId: r.goalId,
+      amount: r.amount,
+      percent: numOrNull(r.percent),
+      createdAt: iso(r.createdAt),
+    })),
+    allocationOverrides: rows.allocationOverrides.map((o) => ({
+      id: o.id,
+      ruleId: o.ruleId,
+      month: o.month,
+      amount: o.amount,
+      createdAt: iso(o.createdAt),
     })),
   };
 }
@@ -188,6 +341,15 @@ function whole(o: Obj, k: string, w: string, what = "a whole number of piasters"
   return o[k] as number;
 }
 
+/** A decimal rate like 0.12; numeric(8,6) holds anything under 100 in size. */
+function rate(o: Obj, k: string, w: string): number {
+  const v = o[k];
+  if (typeof v !== "number" || !Number.isFinite(v) || Math.abs(v) >= RATE_LIMIT) {
+    bad(`${w}.${k}`, `must be a decimal rate such as 0.12 for 12% (under ${RATE_LIMIT} in size)`);
+  }
+  return v as number;
+}
+
 function oneOf<T extends string>(o: Obj, k: string, w: string, allowed: readonly T[]): T {
   if (!allowed.includes(o[k] as T)) bad(`${w}.${k}`, `must be one of ${allowed.join(", ")}`);
   return o[k] as T;
@@ -222,6 +384,7 @@ const orNull =
 
 const textOrNull = orNull(text);
 const wholeOrNull = orNull((o: Obj, k: string, w: string) => whole(o, k, w));
+const rateOrNull = orNull(rate);
 const uuidOrNull = orNull(uuid);
 const stampOrNull = orNull(stamp);
 
@@ -300,16 +463,145 @@ export function insertOrder<T extends { id: string; replacesId: string | null }>
   return [...txs].sort((a, b) => depth.get(a.id)! - depth.get(b.id)!);
 }
 
+function parseSettings(raw: unknown, version: number): BackupSettings {
+  const o = entry(raw, "settings");
+  const monthStartDay = whole(o, "monthStartDay", "settings", "a whole number from 1 to 28");
+  if (monthStartDay < 1 || monthStartDay > 28) bad("settings.monthStartDay", "must be a whole number from 1 to 28");
+  if (version < 2) {
+    return {
+      monthStartDay,
+      savingsTargetMode: "flexible",
+      savingsTargetAmount: null,
+      savingsTargetPercent: null,
+      expectedMonthlyIncome: null,
+      expectedMonthlySpending: null,
+    };
+  }
+  return {
+    monthStartDay,
+    savingsTargetMode: oneOf(o, "savingsTargetMode", "settings", SAVINGS_MODES),
+    savingsTargetAmount: wholeOrNull(o, "savingsTargetAmount", "settings"),
+    savingsTargetPercent: rateOrNull(o, "savingsTargetPercent", "settings"),
+    expectedMonthlyIncome: wholeOrNull(o, "expectedMonthlyIncome", "settings"),
+    expectedMonthlySpending: wholeOrNull(o, "expectedMonthlySpending", "settings"),
+  };
+}
+
+// Same rules as the goals_*_check constraints in db/schema.ts.
+function parseGoal(raw: unknown, i: number): BackupGoal {
+  const w = `goals[${i}]`;
+  const o = entry(raw, w);
+  const g: BackupGoal = {
+    id: uuid(o, "id", w),
+    name: name(o, "name", w),
+    targetAmount: whole(o, "targetAmount", w),
+    targetDate: day(o, "targetDate", w),
+    startDate: day(o, "startDate", w),
+    priority: whole(o, "priority", w, "a whole number of 1 or more"),
+    plannedMonthly: wholeOrNull(o, "plannedMonthly", w),
+    expectedReturnOverride: rateOrNull(o, "expectedReturnOverride", w),
+    manualCurrent: wholeOrNull(o, "manualCurrent", w),
+    notes: textOrNull(o, "notes", w),
+    color: textOrNull(o, "color", w),
+    icon: textOrNull(o, "icon", w),
+    archivedAt: stampOrNull(o, "archivedAt", w),
+    createdAt: stamp(o, "createdAt", w),
+    updatedAt: stamp(o, "updatedAt", w),
+  };
+  if (g.targetAmount <= 0) bad(`${w}.targetAmount`, "must be above zero");
+  if (g.priority < 1 || g.priority > INT4_MAX) bad(`${w}.priority`, `must be a whole number from 1 to ${INT4_MAX}`);
+  if (g.plannedMonthly !== null && g.plannedMonthly < 0) bad(`${w}.plannedMonthly`, "must not be negative");
+  if (g.manualCurrent !== null && g.manualCurrent < 0) bad(`${w}.manualCurrent`, "must not be negative");
+  return g;
+}
+
+// Same rules as the allocation_rules checks in db/schema.ts.
+function parseRule(raw: unknown, i: number): BackupAllocationRule {
+  const w = `allocationRules[${i}]`;
+  const o = entry(raw, w);
+  const r: BackupAllocationRule = {
+    id: uuid(o, "id", w),
+    kind: oneOf(o, "kind", w, RULE_KINDS),
+    targetKind: oneOf(o, "targetKind", w, TARGET_KINDS),
+    goalId: uuidOrNull(o, "goalId", w),
+    amount: wholeOrNull(o, "amount", w),
+    percent: rateOrNull(o, "percent", w),
+    createdAt: stamp(o, "createdAt", w),
+  };
+  if ((r.goalId !== null) !== (r.targetKind === "goal")) bad(w, "goalId must be set exactly when targetKind is goal");
+  if (r.kind === "fixed" && !(r.amount !== null && r.amount > 0 && r.percent === null)) {
+    bad(w, "a fixed rule needs an amount above zero and no percent");
+  }
+  if (r.kind === "percentage" && !(r.percent !== null && r.percent > 0 && r.percent <= 1 && r.amount === null)) {
+    bad(w, "a percentage rule needs a percent above 0 and up to 1, and no amount");
+  }
+  if (r.kind === "remainder" && (r.amount !== null || r.percent !== null)) {
+    bad(w, "a remainder rule has neither an amount nor a percent");
+  }
+  return r;
+}
+
+function parseGoalAllocation(raw: unknown, i: number): BackupGoalAllocation {
+  const w = `goalAllocations[${i}]`;
+  const o = entry(raw, w);
+  const a: BackupGoalAllocation = {
+    id: uuid(o, "id", w),
+    goalId: uuid(o, "goalId", w),
+    accountId: uuid(o, "accountId", w),
+    amount: whole(o, "amount", w),
+    createdAt: stamp(o, "createdAt", w),
+    updatedAt: stamp(o, "updatedAt", w),
+  };
+  if (a.amount <= 0) bad(`${w}.amount`, "must be above zero");
+  return a;
+}
+
+function parseGoalAllocationEvent(raw: unknown, i: number): BackupGoalAllocationEvent {
+  const w = `goalAllocationEvents[${i}]`;
+  const o = entry(raw, w);
+  const e: BackupGoalAllocationEvent = {
+    id: uuid(o, "id", w),
+    goalId: uuid(o, "goalId", w),
+    accountId: uuid(o, "accountId", w),
+    delta: whole(o, "delta", w),
+    date: day(o, "date", w),
+    note: textOrNull(o, "note", w),
+    createdAt: stamp(o, "createdAt", w),
+  };
+  if (e.delta === 0) bad(`${w}.delta`, "must not be zero");
+  return e;
+}
+
+const MONTH = /^\d{4}-(0[1-9]|1[0-2])$/;
+
+function parseAllocationOverride(raw: unknown, i: number): BackupAllocationOverride {
+  const w = `allocationOverrides[${i}]`;
+  const o = entry(raw, w);
+  const v: BackupAllocationOverride = {
+    id: uuid(o, "id", w),
+    ruleId: uuid(o, "ruleId", w),
+    month: text(o, "month", w),
+    amount: whole(o, "amount", w),
+    createdAt: stamp(o, "createdAt", w),
+  };
+  if (!MONTH.test(v.month)) bad(`${w}.month`, "must be a month like 2026-03");
+  if (v.amount < 0) bad(`${w}.amount`, "must not be negative");
+  return v;
+}
+
+/** A collection that version 1 files do not have: empty for them, required (a list) for version 2. */
+function listSince2(root: Obj, key: string, version: number): unknown[] {
+  return version < 2 ? [] : list(root, key);
+}
+
 function build(input: unknown): Backup {
   if (!isObj(input)) throw new BackupError("Not a Till backup: the file must contain a JSON object.");
-  if (input.version !== BACKUP_VERSION) {
-    bad("version", `${JSON.stringify(input.version)} is not supported (this app reads version ${BACKUP_VERSION})`);
+  const version = input.version;
+  if (version !== OLDEST_VERSION && version !== BACKUP_VERSION) {
+    bad("version", `${JSON.stringify(version)} is not supported (this app reads versions ${OLDEST_VERSION} to ${BACKUP_VERSION})`);
   }
   const exportedAt = stamp(input, "exportedAt", "backup");
-
-  const settings = entry(input.settings, "settings");
-  const monthStartDay = whole(settings, "monthStartDay", "settings", "a whole number from 1 to 28");
-  if (monthStartDay < 1 || monthStartDay > 28) bad("settings.monthStartDay", "must be a whole number from 1 to 28");
+  const settings = parseSettings(input.settings, version);
 
   const accounts = list(input, "accounts").map((raw, i): BackupAccount => {
     const w = `accounts[${i}]`;
@@ -359,7 +651,55 @@ function build(input: unknown): Backup {
   });
   if (!replaceDepths(transactions)) bad("transactions", "replacesId links form a loop");
 
-  return { version: BACKUP_VERSION, exportedAt, settings: { monthStartDay }, accounts, categories, transactions };
+  const goals = listSince2(input, "goals", version).map(parseGoal);
+  const goalAllocations = listSince2(input, "goalAllocations", version).map(parseGoalAllocation);
+  const goalAllocationEvents = listSince2(input, "goalAllocationEvents", version).map(parseGoalAllocationEvent);
+  const allocationRules = listSince2(input, "allocationRules", version).map(parseRule);
+  const allocationOverrides = listSince2(input, "allocationOverrides", version).map(parseAllocationOverride);
+  unique(goals.map((g) => g.id), "goals.id");
+  unique(goalAllocations.map((a) => a.id), "goalAllocations.id");
+  unique(goalAllocations.map((a) => `${a.goalId} ${a.accountId}`), "goalAllocations (goal and account)");
+  unique(goalAllocationEvents.map((e) => e.id), "goalAllocationEvents.id");
+  unique(allocationRules.map((r) => r.id), "allocationRules.id");
+  if (allocationRules.filter((r) => r.kind === "remainder").length > 1) bad("allocationRules", "at most one remainder rule is allowed");
+  unique(allocationOverrides.map((o) => o.id), "allocationOverrides.id");
+  unique(allocationOverrides.map((o) => `${o.ruleId} ${o.month}`), "allocationOverrides (rule and month)");
+
+  const goalIds = new Set(goals.map((g) => g.id));
+  const ruleIds = new Set(allocationRules.map((r) => r.id));
+  const needGoal = (id: string | null, where: string) => {
+    if (id && !goalIds.has(id)) bad(where, "refers to a goal that is not in the file");
+  };
+  const needAccount = (id: string, where: string) => {
+    if (!accountIds.has(id)) bad(where, "refers to an account that is not in the file");
+  };
+  goalAllocations.forEach((a, i) => {
+    needGoal(a.goalId, `goalAllocations[${i}].goalId`);
+    needAccount(a.accountId, `goalAllocations[${i}].accountId`);
+  });
+  goalAllocationEvents.forEach((e, i) => {
+    needGoal(e.goalId, `goalAllocationEvents[${i}].goalId`);
+    needAccount(e.accountId, `goalAllocationEvents[${i}].accountId`);
+  });
+  allocationRules.forEach((r, i) => needGoal(r.goalId, `allocationRules[${i}].goalId`));
+  allocationOverrides.forEach((o, i) => {
+    if (!ruleIds.has(o.ruleId)) bad(`allocationOverrides[${i}].ruleId`, "refers to a rule that is not in the file");
+  });
+
+  // A version 1 file becomes the current shape: its new collections are empty and its settings are the defaults.
+  return {
+    version: BACKUP_VERSION,
+    exportedAt,
+    settings,
+    accounts,
+    categories,
+    transactions,
+    goals,
+    goalAllocations,
+    goalAllocationEvents,
+    allocationRules,
+    allocationOverrides,
+  };
 }
 
 /** Validates everything before anything is written; the error names the first problem found. */

@@ -4,11 +4,14 @@ import { AccountList } from "@/components/AccountList";
 import { Amount } from "@/components/Amount";
 import { formatRange } from "@/components/dates";
 import { EmptyState } from "@/components/EmptyState";
+import { GoalCard } from "@/components/GoalCard";
+import { GoalPlanCard } from "@/components/GoalPlanCard";
 import { card } from "@/components/ui";
 import { accountBalances, getSettings, listAccounts, listTransactions, toLedgerTx } from "@/db/queries";
 import { requireUserId } from "@/lib/auth";
 import { filterByDateRange, netWorth, periodSummary } from "@/lib/finance-core/ledger";
 import { cairoToday, financialMonth } from "@/lib/finance-core/time";
+import { loadGoalData } from "./goals/data";
 
 function Stat({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -59,6 +62,10 @@ export default async function Home() {
   const percent = month.savingsRate === null ? null : Math.round(month.savingsRate * 100);
   const rate = percent === null ? "—" : `${percent < 0 ? "−" : ""}${Math.abs(percent)}%`;
 
+  const goalData = await loadGoalData(userId, { accounts, txRows, monthStartDay: settings.monthStartDay });
+  const activeGoals = goalData.goals.filter((v) => !v.goal.archivedAt);
+  const fundedRules = goalData.rules.filter((r) => r.outcome);
+
   return (
     <>
       <h1 className="text-3xl font-semibold tracking-tight">Home</h1>
@@ -99,6 +106,39 @@ export default async function Home() {
           <Stat label="Savings rate">{rate}</Stat>
         </dl>
       </section>
+
+      <section className="mt-8">
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <h2 className="text-lg font-semibold tracking-tight">Goals</h2>
+          <Link href="/goals" className="inline-flex min-h-11 items-center text-sm underline">
+            {activeGoals.length > 4 ? `All ${activeGoals.length} goals` : "All goals"}
+          </Link>
+        </div>
+        {activeGoals.length === 0 ? (
+          <p className="text-muted">
+            No goals yet.{" "}
+            <Link href="/goals" className="underline">
+              Add a goal
+            </Link>{" "}
+            to see how much to save each month.
+          </p>
+        ) : (
+          <ul className="grid gap-3 md:grid-cols-2">
+            {activeGoals.slice(0, 4).map((v) => (
+              <li key={v.goal.id}>
+                <GoalCard view={v} compact />
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <GoalPlanCard
+        planned={goalData.totals.planned}
+        actual={goalData.totals.actual}
+        hasRules={fundedRules.length > 0}
+        shortfall={goalData.plan.shortfallTotal}
+      />
 
       <section className="mt-8">
         <h2 className="mb-2 text-lg font-semibold tracking-tight">Accounts</h2>
