@@ -2,7 +2,7 @@
 
 Personal wealth, savings, investment and goal tracker. EGP only, single user, installable on the iPhone home screen (PWA).
 
-Status: Phase 1 complete. The calculation engine, ledger schema, five-tab shell and email + password sign-in exist; every page except `/login` requires a session (`proxy.ts`). There is no data entry yet.
+Status: Phase 2 (core finance) in progress. Phase 1 gave the calculation engine, ledger schema, five-tab shell and email + password sign-in; every page except `/login` requires a session (`proxy.ts`). Phase 2 adds server actions for accounts, categories and transactions, and `/more/backup`: a JSON backup, a transactions CSV, and restore into an empty account. Phase 2 changed no tables (`docs/schema-phase-2.md`).
 
 ## Layout
 
@@ -14,7 +14,7 @@ Status: Phase 1 complete. The calculation engine, ledger schema, five-tab shell 
 
 ```bash
 npm run dev          # local app on http://localhost:3000
-npm test             # engine tests (Vitest)
+npm test             # unit tests: calculation engine and backup (Vitest)
 npm run typecheck
 npm run build
 npm run db:generate  # generate a migration from db/schema.ts

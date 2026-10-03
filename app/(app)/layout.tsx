@@ -1,7 +1,14 @@
 import { PrivacyProvider, PrivacyToggle } from "@/components/PrivacyProvider";
+import { QuickAdd } from "@/components/QuickAdd";
 import { TabBar } from "@/components/TabBar";
+import { listAccounts, listCategories } from "@/db/queries";
+import { requireUserId } from "@/lib/auth";
+import { cairoToday } from "@/lib/finance-core/time";
 
-export default function AppLayout({ children }: LayoutProps<"/">) {
+export default async function AppLayout({ children }: LayoutProps<"/">) {
+  const userId = await requireUserId();
+  const [accounts, categories] = await Promise.all([listAccounts(userId), listCategories(userId)]);
+
   return (
     <PrivacyProvider>
       <div className="md:pl-60">
@@ -11,11 +18,17 @@ export default function AppLayout({ children }: LayoutProps<"/">) {
             <PrivacyToggle />
           </div>
         </header>
-        <main className="mx-auto max-w-2xl px-5 pb-[calc(6rem+env(safe-area-inset-bottom))] md:pb-12">
+        {/* Bottom padding clears the tab bar and the floating + button. */}
+        <main className="mx-auto max-w-2xl px-5 pb-[calc(9rem+env(safe-area-inset-bottom))] md:pb-28">
           {children}
         </main>
       </div>
       <TabBar />
+      <QuickAdd
+        accounts={accounts.map((a) => ({ id: a.id, name: a.name, archived: false }))}
+        categories={categories.map((c) => ({ id: c.id, name: c.name, kind: c.kind, archived: false }))}
+        today={cairoToday()}
+      />
     </PrivacyProvider>
   );
 }
