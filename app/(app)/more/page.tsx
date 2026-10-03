@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { signOut } from "@/app/login/actions";
 import { EmptyState } from "@/components/EmptyState";
 
 export const metadata: Metadata = { title: "More" };
@@ -16,6 +17,11 @@ export default function Page() {
           Accounts, income, reports, scenarios and settings will live here.
         </EmptyState>
       </div>
+      <form action={signOut} className="mt-6">
+        <button type="submit" className="min-h-11 w-full rounded-xl border border-border px-4 font-medium">
+          Sign out
+        </button>
+      </form>
     </>
   );
 }
