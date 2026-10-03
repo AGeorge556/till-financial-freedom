@@ -36,6 +36,13 @@
       "when": 1791035748827,
       "tag": "0004_blushing_sphinx",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1791042437128,
+      "tag": "0005_overconfident_kronos",
+      "breakpoints": true
     }
   ]
 }

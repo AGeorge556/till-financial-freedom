@@ -7,6 +7,7 @@ import {
   accounts,
   allocationOverrides,
   allocationRules,
+  budgets,
   categories,
   cloudConfirmations,
   corporateActions,
@@ -20,6 +21,7 @@ import {
   liabilityUpdates,
   priceUpdates,
   rateHistory,
+  recurringTemplates,
   transactions,
   userSettings,
 } from "@/db/schema";
@@ -40,7 +42,7 @@ export type ImportState = {
 };
 
 const MAX_BYTES = 5 * 1024 * 1024;
-// 20 columns (the widest table) x 1,000 rows stays under Postgres's 65,535 bind-parameter limit.
+// 23 columns (the widest table) x 1,000 rows stays under Postgres's 65,535 bind-parameter limit.
 const CHUNK = 1000;
 
 class Refused extends Error {}
@@ -77,7 +79,13 @@ export async function importBackup(_prev: ImportState, formData: FormData): Prom
     await db.transaction(async (tx) => {
       // Upserting settings first takes this user's row lock, so a second restore running at the same time
       // waits here until this one commits, then finds data and refuses.
-      const settings = { ...b.settings, savingsTargetPercent: rateText(b.settings.savingsTargetPercent) };
+      const settings = {
+        ...b.settings,
+        savingsTargetPercent: rateText(b.settings.savingsTargetPercent),
+        // numeric(4,3): the parser already refused anything with more than 3 decimals.
+        budgetWarnAt: b.settings.budgetWarnAt.toFixed(3),
+        budgetAlertAt: b.settings.budgetAlertAt.toFixed(3),
+      };
       await tx
         .insert(userSettings)
         .values({ userId, ...settings })
@@ -91,7 +99,9 @@ export async function importBackup(_prev: ImportState, formData: FormData): Prom
       // Liabilities and gold prices belong to no account, so an account-less user can still own them.
       const [l] = await tx.select({ n: count() }).from(liabilities).where(eq(liabilities.userId, userId));
       const [gp] = await tx.select({ n: count() }).from(goldPrices).where(eq(goldPrices.userId, userId));
-      if (a.n + c.n + t.n + g.n + r.n + l.n + gp.n > 0) {
+      // An overall budget has no category, so it too can exist in an otherwise empty account.
+      const [bu] = await tx.select({ n: count() }).from(budgets).where(eq(budgets.userId, userId));
+      if (a.n + c.n + t.n + g.n + r.n + l.n + gp.n + bu.n > 0) {
         throw new Refused(
           "Nothing was restored. A backup can only be restored into an empty account; this one already has data.",
         );
@@ -112,6 +122,17 @@ export async function importBackup(_prev: ImportState, formData: FormData): Prom
         await tx
           .insert(categories)
           .values(part.map((r) => ({ ...r, userId, archivedAt: when(r.archivedAt), createdAt: new Date(r.createdAt) })));
+      }
+      for (const part of chunks(b.budgets)) {
+        await tx.insert(budgets).values(
+          part.map((r) => ({ ...r, userId, createdAt: new Date(r.createdAt), updatedAt: new Date(r.updatedAt) })),
+        );
+      }
+      // Recurring templates need accounts and categories, and the transactions generated from them need the templates.
+      for (const part of chunks(b.recurringTemplates)) {
+        await tx.insert(recurringTemplates).values(
+          part.map((r) => ({ ...r, userId, createdAt: new Date(r.createdAt), updatedAt: new Date(r.updatedAt) })),
+        );
       }
       // Dependency order: liabilities and holdings first (holdings need accounts); transactions need both, and the
       // updates, prices, rates, confirmations and corporate actions need their holding or liability.

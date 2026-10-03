@@ -5,6 +5,7 @@ import {
   type AllocationEventRow,
   accountBalances,
   type Assumptions,
+  essentialMonthlyTotals,
   getAssumptions,
   getPlanSettings,
   getSettings,
@@ -37,11 +38,13 @@ import {
   type AllocationSource,
   attributeOverAllocation,
   blendedReturn,
+  emergencyTarget,
   goalCurrentAmount,
   goalProjection,
   type GoalProjection,
   overAllocatedBy,
   plannedMonthly,
+  shareValues,
   sourceReturn,
   sourceValue,
   trailingCapacity,
@@ -109,8 +112,22 @@ export type HoldingChoice = {
 /** What a source is called in the line that says which assumed return is missing. */
 const SOURCE_LABEL = { cash: "cash", stock: "stocks and funds", fund: "stocks and funds", other: "stocks and funds", gold: "gold", cloud: "Savings Clouds" } as const;
 
+/**
+ * How a goal's target came about. For "expense_months" `goal.targetAmount` in the view is the recalculated target, and
+ * `stored` is what the database holds (the fallback used while there is no full month of history).
+ */
+export type GoalTarget =
+  | { mode: "manual"; stored: Piasters }
+  | {
+      mode: "expense_months";
+      months: number;
+      stored: Piasters;
+      calc: { kind: "target"; monthlyEssential: Piasters; monthsUsed: number } | { kind: "fallback"; reason: "no-history" | "no-essential-spending" };
+    };
+
 export type GoalView = {
   goal: GoalRow;
+  target: GoalTarget;
   current: Piasters;
   currentSource: "allocations" | "manual";
   allocations: GoalAllocationView[];
@@ -193,7 +210,7 @@ export async function loadGoalData(userId: string, preloaded?: Preloaded): Promi
   const month = financialMonth(today, startDay);
   const monthKey = month.start.slice(0, 7);
 
-  const [goalRows, allocRows, events, ruleRows, overrides, ps, assumptions, wealth] = await Promise.all([
+  const [storedGoals, allocRows, events, ruleRows, overrides, ps, assumptions, wealth] = await Promise.all([
     listGoals(userId, { includeArchived: true }),
     listGoalAllocations(userId),
     listAllocationEvents(userId),
@@ -203,6 +220,33 @@ export async function loadGoalData(userId: string, preloaded?: Preloaded): Promi
     getAssumptions(userId),
     preloaded?.wealth ?? loadWealth(userId, today),
   ]);
+
+  // E1: an "expense_months" goal's target is N x the average essential spending of the last full months, recalculated on every load.
+  const essential = storedGoals.some((g) => g.targetMode === "expense_months") ? await essentialMonthlyTotals(userId, today, startDay) : [];
+  const targets = new Map<string, GoalTarget>();
+  const goalRows = storedGoals.map((g): GoalRow => {
+    if (g.targetMode !== "expense_months" || g.targetMonths === null) {
+      targets.set(g.id, { mode: "manual", stored: g.targetAmount });
+      return g;
+    }
+    const result = emergencyTarget({ months: g.targetMonths, essentialMonthlyTotals: essential });
+    if (result.kind === "target" && result.target > 0) {
+      targets.set(g.id, {
+        mode: "expense_months",
+        months: g.targetMonths,
+        stored: g.targetAmount,
+        calc: { kind: "target", monthlyEssential: result.monthlyEssential, monthsUsed: result.monthsUsed },
+      });
+      return { ...g, targetAmount: result.target };
+    }
+    targets.set(g.id, {
+      mode: "expense_months",
+      months: g.targetMonths,
+      stored: g.targetAmount,
+      calc: { kind: "fallback", reason: result.kind === "target" ? "no-essential-spending" : "no-history" },
+    });
+    return g;
+  });
 
   // A row is cash on an account (account + amount) or a share of a holding (holding + percent), never both.
   const cashRows = allocRows.flatMap((a) => (a.accountId !== null && a.amount !== null ? [{ ...a, accountId: a.accountId, amount: a.amount }] : []));
@@ -289,12 +333,18 @@ export async function loadGoalData(userId: string, preloaded?: Preloaded): Promi
   }));
 
   // Goals.
+  const shareAmount = new Map<string, number>();
+  for (const holdingId of new Set(shareRows.map((a) => a.holdingId))) {
+    const rows = shareRows.filter((a) => a.holdingId === holdingId);
+    const values = shareValues(wealth.holdingValues.get(holdingId) ?? 0, rows.map((a) => a.percent));
+    rows.forEach((a, i) => shareAmount.set(a.id, values[i]));
+  }
+
   const goalViews: GoalView[] = goalRows.map((goal) => {
     const cash = cashRows.filter((a) => a.goalId === goal.id);
     const shares = shareRows.filter((a) => a.goalId === goal.id);
-    const holdingSources = shares.map(
-      (a): AllocationSource => ({ kind: "holding", percent: a.percent, holdingValue: wealth.holdingValues.get(a.holdingId) ?? 0 }),
-    );
+    // A fixed amount from shareValues, not a per-goal percentage: goals sharing one holding never add up to more than it.
+    const holdingSources = shares.map((a): AllocationSource => ({ kind: "cash", amount: shareAmount.get(a.id) ?? 0 }));
     const sources: AllocationSource[] = [...cash.map((a): AllocationSource => ({ kind: "cash", amount: a.amount })), ...holdingSources];
     const kinds = [
       ...cash.map(() => ({ kind: "cash" }) as const),
@@ -352,6 +402,7 @@ export async function loadGoalData(userId: string, preloaded?: Preloaded): Promi
     ];
     return {
       goal,
+      target: targets.get(goal.id)!,
       current: current.amount,
       currentSource: current.source,
       allocations,

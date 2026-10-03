@@ -1,7 +1,9 @@
 import "server-only";
-import { and, asc, desc, eq, gte, isNotNull, isNull, lte } from "drizzle-orm";
+import { and, asc, desc, eq, gte, isNotNull, isNull, lte, min } from "drizzle-orm";
 import type { SavingsTargetMode } from "@/lib/finance-core/allocation";
-import { accountBalance, type Tx } from "@/lib/finance-core/ledger";
+import { fullMonths, monthTotals } from "@/lib/finance-core/analytics";
+import { DEFAULT_BUDGET_ALERT_AT, DEFAULT_BUDGET_WARN_AT } from "@/lib/finance-core/budget";
+import { accountBalance, netWorth, type Tx } from "@/lib/finance-core/ledger";
 import type { Piasters } from "@/lib/finance-core/money";
 import {
   apyAsOf,
@@ -15,6 +17,7 @@ import { DEFAULT_STALE_DAYS_GOLD, type GoldPrice, type GoldPriceMode, goldPrices
 import { holdingFreeShare } from "@/lib/finance-core/goals";
 import { outstanding } from "@/lib/finance-core/liabilities";
 import { DEFAULT_STALE_DAYS, type HoldingEvent, type PriceUpdate, portfolioValue } from "@/lib/finance-core/portfolio";
+import { missingOccurrences, type RecurringRow, type RecurringTemplate } from "@/lib/finance-core/recurring";
 import { cairoToday } from "@/lib/finance-core/time";
 import { eventsByHolding, type LedgerEvent, toHoldingEvents } from "@/lib/backup";
 import { db } from "./index";
@@ -22,6 +25,7 @@ import {
   accounts,
   allocationOverrides,
   allocationRules,
+  budgets,
   categories,
   cloudConfirmations,
   corporateActions,
@@ -35,6 +39,7 @@ import {
   liabilityUpdates,
   priceUpdates,
   rateHistory,
+  recurringTemplates,
   transactions,
   userSettings,
 } from "./schema";
@@ -700,5 +705,311 @@ export async function loadWealth(userId: string, today: string = cairoToday()): 
     liabilitiesTotal: views.reduce((sum, l) => sum + l.outstanding, 0),
     holdingShares,
     freeShares,
+  };
+}
+
+// ---- Phase 5a: budgets, recurring items, month and net worth loaders, backup rows ----
+
+export type BudgetRow = typeof budgets.$inferSelect;
+export type RecurringTemplateRow = typeof recurringTemplates.$inferSelect;
+type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/** In creation order. The overall budget is the one with no categoryId. */
+export function listBudgets(userId: string, executor: Executor = db): Promise<BudgetRow[]> {
+  return executor
+    .select()
+    .from(budgets)
+    .where(eq(budgets.userId, userId))
+    .orderBy(asc(budgets.createdAt), asc(budgets.id));
+}
+
+/** Active and inactive ones by name, or only the active ones. */
+export function listRecurringTemplates(
+  userId: string,
+  options: { activeOnly?: boolean } = {},
+  executor: Executor = db,
+): Promise<RecurringTemplateRow[]> {
+  return executor
+    .select()
+    .from(recurringTemplates)
+    .where(and(eq(recurringTemplates.userId, userId), options.activeOnly ? eq(recurringTemplates.active, true) : undefined))
+    .orderBy(asc(recurringTemplates.name), asc(recurringTemplates.createdAt));
+}
+
+/** Generated rows waiting for a confirm or skip, oldest first. Their note is the template's name. */
+export function listPendingRecurring(userId: string): Promise<TransactionRow[]> {
+  return db
+    .select()
+    .from(transactions)
+    .where(and(eq(transactions.userId, userId), eq(transactions.status, "pending"), isNotNull(transactions.recurringTemplateId)))
+    .orderBy(asc(transactions.date), asc(transactions.createdAt));
+}
+
+/** Budget warning thresholds as decimals (0.8 = 80% of a budget spent), defaults until the user sets them. */
+export async function getBudgetThresholds(userId: string): Promise<{ warnAt: number; alertAt: number }> {
+  const [row] = await db
+    .select({ warnAt: userSettings.budgetWarnAt, alertAt: userSettings.budgetAlertAt })
+    .from(userSettings)
+    .where(eq(userSettings.userId, userId));
+  return {
+    warnAt: row ? Number(row.warnAt) : DEFAULT_BUDGET_WARN_AT,
+    alertAt: row ? Number(row.alertAt) : DEFAULT_BUDGET_ALERT_AT,
+  };
+}
+
+const toTemplate = (t: RecurringTemplateRow): RecurringTemplate => ({
+  id: t.id,
+  type: t.type as RecurringTemplate["type"], // recurring_templates_type_check
+  amount: t.amount,
+  categoryId: t.categoryId,
+  accountId: t.accountId,
+  frequency: t.frequency,
+  startDate: t.startDate,
+  endDate: t.endDate,
+  active: t.active,
+});
+
+/** A ledger row as the budget and analytics engines want it: `fixed` = it came from a recurring template. */
+export const toAnalyticsTx = (row: TransactionRow): Tx & { categoryId: string | null; fixed: boolean } => ({
+  ...toLedgerTx(row),
+  categoryId: row.categoryId,
+  fixed: row.recurringTemplateId !== null,
+});
+
+const GENERATE_CHUNK = 500;
+
+/**
+ * Lazy, idempotent generation (R3): inserts every due date up to today that has no row yet, for every active template
+ * (or one), pending unless the template auto-posts. Safe on every page load and from concurrent requests: the unique
+ * index on (template, due date) plus ON CONFLICT DO NOTHING means a date is created exactly once, whatever its status
+ * (a skipped row stays skipped). Returns how many rows it created. Lives here, not in app/actions, because every export
+ * of a "use server" file is a public endpoint and this one takes a user id. `forcePending` is for a template that was
+ * just reactivated: the gap while it was off never posts money by itself.
+ */
+export async function generateDueRecurring(
+  userId: string,
+  options: { today?: string; templateId?: string; forcePending?: boolean; tx?: DbTransaction } = {},
+): Promise<number> {
+  const today = options.today ?? cairoToday();
+  const run = async (tx: DbTransaction): Promise<number> => {
+    const templates = await tx
+      .select()
+      .from(recurringTemplates)
+      .where(
+        and(
+          eq(recurringTemplates.userId, userId),
+          eq(recurringTemplates.active, true),
+          options.templateId ? eq(recurringTemplates.id, options.templateId) : undefined,
+        ),
+      );
+    if (templates.length === 0) return 0;
+    const existing = await tx
+      .select({ templateId: transactions.recurringTemplateId, dueDate: transactions.recurringDueDate })
+      .from(transactions)
+      .where(and(eq(transactions.userId, userId), isNotNull(transactions.recurringTemplateId)));
+    const have = new Map<string, string[]>();
+    for (const r of existing) have.set(r.templateId!, [...(have.get(r.templateId!) ?? []), r.dueDate!]);
+
+    const rows = templates.flatMap((t) =>
+      missingOccurrences(t, have.get(t.id) ?? [], today).map((dueDate) => ({
+        userId,
+        type: t.type,
+        date: dueDate,
+        amount: t.amount,
+        fromAccountId: t.type === "EXPENSE" ? t.accountId : null,
+        toAccountId: t.type === "INCOME" ? t.accountId : null,
+        categoryId: t.categoryId,
+        note: t.name,
+        status: t.autoPost && !options.forcePending ? ("posted" as const) : ("pending" as const),
+        recurringTemplateId: t.id,
+        recurringDueDate: dueDate,
+      })),
+    );
+    let created = 0;
+    for (let i = 0; i < rows.length; i += GENERATE_CHUNK) {
+      const inserted = await tx
+        .insert(transactions)
+        .values(rows.slice(i, i + GENERATE_CHUNK))
+        .onConflictDoNothing({ target: [transactions.recurringTemplateId, transactions.recurringDueDate] })
+        .returning({ id: transactions.id });
+      created += inserted.length;
+    }
+    return created;
+  };
+  return options.tx ? run(options.tx) : db.transaction(run);
+}
+
+export type MonthData = {
+  range: { start: string; end: string };
+  /** Every ledger row dated in the month, any status: the engines count posted rows only. */
+  txs: TransactionRow[];
+  /** Manual loan updates dated in the month. */
+  liabilityUpdates: LiabilityUpdateRow[];
+  /** Goal allocation events dated in the month, newest first. */
+  allocationEvents: AllocationEventRow[];
+  /** Active templates, and the rows already generated for due dates in the month (any status): input of upcomingInMonth. */
+  templates: RecurringTemplate[];
+  occurrences: RecurringRow[];
+};
+
+/** One financial month for the review and the budgets, in five queries. */
+export async function loadMonth(userId: string, range: { start: string; end: string }): Promise<MonthData> {
+  const [txs, updates, allocationEvents, templates, occurrences] = await Promise.all([
+    listTransactions(userId, { from: range.start, to: range.end }),
+    db
+      .select()
+      .from(liabilityUpdates)
+      .where(and(eq(liabilityUpdates.userId, userId), gte(liabilityUpdates.date, range.start), lte(liabilityUpdates.date, range.end)))
+      .orderBy(asc(liabilityUpdates.date), asc(liabilityUpdates.createdAt)),
+    listAllocationEvents(userId, { from: range.start, to: range.end }),
+    listRecurringTemplates(userId, { activeOnly: true }),
+    db
+      .select({ templateId: transactions.recurringTemplateId, dueDate: transactions.recurringDueDate, status: transactions.status })
+      .from(transactions)
+      .where(
+        and(
+          eq(transactions.userId, userId),
+          isNotNull(transactions.recurringTemplateId),
+          gte(transactions.recurringDueDate, range.start),
+          lte(transactions.recurringDueDate, range.end),
+        ),
+      ),
+  ]);
+  return {
+    range,
+    txs,
+    liabilityUpdates: updates,
+    allocationEvents,
+    templates: templates.map(toTemplate),
+    occurrences: occurrences.map((o) => ({ templateId: o.templateId!, dueDate: o.dueDate!, status: o.status })),
+  };
+}
+
+/** Date of the first posted ledger row, or null with no history yet: the start of the data for fullMonths. */
+export async function firstTransactionDate(userId: string): Promise<string | null> {
+  const [row] = await db
+    .select({ first: min(transactions.date) })
+    .from(transactions)
+    .where(and(eq(transactions.userId, userId), eq(transactions.status, "posted")));
+  return row?.first ?? null;
+}
+
+/**
+ * Essential spending (expense categories flagged is_essential) of each of the last `months` FULL financial months before
+ * the current one, oldest first; empty with less than one full month of history. Input of emergencyTarget.
+ */
+export async function essentialMonthlyTotals(userId: string, today: string, monthStartDay: number, months = 6): Promise<Piasters[]> {
+  const ranges = fullMonths(await firstTransactionDate(userId), today, monthStartDay, months);
+  if (ranges.length === 0) return [];
+  const rows = await db
+    .select({ type: transactions.type, date: transactions.date, amount: transactions.amount, status: transactions.status })
+    .from(transactions)
+    .innerJoin(categories, eq(transactions.categoryId, categories.id))
+    .where(
+      and(
+        eq(transactions.userId, userId),
+        eq(categories.userId, userId),
+        eq(categories.isEssential, true),
+        eq(transactions.type, "EXPENSE"),
+        gte(transactions.date, ranges[0].start),
+        lte(transactions.date, ranges[ranges.length - 1].end),
+      ),
+    );
+  return monthTotals(rows, ranges).map((m) => m.spending);
+}
+
+export type NetWorthSnapshot = { date: string; cash: Piasters; holdings: Piasters; liabilities: Piasters; netWorth: Piasters };
+
+/**
+ * Net worth as of each date (cash + holdings, gold and clouds - liabilities), from one load of the user's records.
+ * Records dated after a date are ignored: ledger rows, prices, confirmations, rate changes, loan updates and payments.
+ * An account's opening balance and a loan's opening balance count from the start (neither has an effective date).
+ */
+export async function loadNetWorthSnapshots(userId: string, dates: string[]): Promise<NetWorthSnapshot[]> {
+  const [accountRows, txRows, portfolio, liabilityRows, updates, liabilityTxs] = await Promise.all([
+    listAccounts(userId, { includeArchived: true }),
+    listTransactions(userId),
+    loadPortfolio(userId),
+    listLiabilities(userId, { includeArchived: true }),
+    listLiabilityUpdates(userId),
+    listLiabilityTransactions(userId),
+  ]);
+  const ledger = txRows.map(toLedgerTx);
+  return dates.map((date) => {
+    const upTo = ledger.filter((t) => t.date <= date);
+    const cash = accountRows.reduce((sum, a) => sum + accountBalance(a.openingBalance, a.id, upTo), 0);
+    const holdingsValue = valuePortfolio(portfolio, date).total;
+    const owed = liabilityRows.reduce(
+      (sum, l) =>
+        sum +
+        outstandingOf(
+          l,
+          updates.filter((u) => u.liabilityId === l.id),
+          liabilityTxs.filter((t) => t.liabilityId === l.id),
+          date,
+        ),
+      0,
+    );
+    return { date, cash, holdings: holdingsValue, liabilities: owed, netWorth: netWorth({ cash, holdings: holdingsValue, liabilities: owed }) };
+  });
+}
+
+export async function loadNetWorthAsOf(userId: string, date: string): Promise<NetWorthSnapshot> {
+  return (await loadNetWorthSnapshots(userId, [date]))[0];
+}
+
+/** Goals, allocations, rules and overrides, read in the same children-first order. */
+async function readPlanning(userId: string) {
+  const goalAllocationEvents = await listAllocationEvents(userId);
+  const goalAllocations = await listGoalAllocations(userId);
+  const allocationRules = await listRules(userId);
+  // Rules can be deleted (their overrides go with them); drop overrides of a rule created after the rules were read.
+  const ruleIds = new Set(allocationRules.map((r) => r.id));
+  const allocationOverrides = (await listOverrides(userId)).filter((o) => ruleIds.has(o.ruleId));
+  const goals = await listGoals(userId, { includeArchived: true });
+  return { goals, goalAllocations, goalAllocationEvents, allocationRules, allocationOverrides };
+}
+
+/** Children first (prices, rates, confirmations, loan updates), then the holdings and loans they point at. */
+async function readInvestments(userId: string) {
+  const wealth = await listWealthRows(userId);
+  const priceUpdates = await listPriceUpdateRows(userId);
+  const corporateActions = await listCorporateActions(userId);
+  const holdings = await listHoldings(userId, { includeArchived: true });
+  return { ...wealth, holdings, priceUpdates, corporateActions };
+}
+
+/**
+ * Every table the backup holds, read children first and then what they point at: accounts, categories, goals and
+ * recurring templates are never hard-deleted, so everything a row points at is still there by the time it is read, even
+ * if a write lands in between. The return type is left to inference on purpose: the export route passes it to
+ * serializeBackup and lib/backup.test.ts assigns it to BackupRows, so a table left out here fails the typecheck.
+ */
+export async function loadBackupRows(userId: string) {
+  const transactionRows = await listTransactions(userId);
+  const templateRows = await listRecurringTemplates(userId);
+  const planning = await readPlanning(userId);
+  const investments = await readInvestments(userId);
+  const budgetRows = await listBudgets(userId);
+  const accountRows = await listAccounts(userId, { includeArchived: true });
+  const categoryRows = await listCategories(userId, { includeArchived: true });
+  const thresholds = await getBudgetThresholds(userId);
+  const settings = {
+    ...(await getSettings(userId)),
+    ...(await getPlanSettings(userId)),
+    staleDaysHoldings: await getStaleDays(userId),
+    budgetWarnAt: thresholds.warnAt,
+    budgetAlertAt: thresholds.alertAt,
+  };
+  return {
+    settings,
+    accounts: accountRows,
+    categories: categoryRows,
+    transactions: transactionRows,
+    assumptions: await getAssumptions(userId),
+    budgets: budgetRows,
+    recurringTemplates: templateRows,
+    ...planning,
+    ...investments,
   };
 }

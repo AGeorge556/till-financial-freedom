@@ -6,10 +6,12 @@ import {
   categoryKind,
   contributionFrequency,
   corporateActionKind,
+  goalTargetMode,
   goldForm,
   goldPriceMode,
   holdingKind,
   liabilityKind,
+  recurringFrequency,
   savingsTargetMode,
   transactionStatus,
   transactionType,
@@ -21,12 +23,14 @@ import {
   CONTRIBUTION_FREQUENCIES,
   CORPORATE_ACTION_KINDS,
   eventsByHolding,
+  GOAL_TARGET_MODES,
   GOLD_FORMS,
   GOLD_PRICE_MODES,
   HOLDING_KINDS,
   insertOrder,
   LIABILITY_KINDS,
   parseBackup,
+  RECURRING_FREQUENCIES,
   RULE_KINDS,
   SAVINGS_MODES,
   serializeBackup,
@@ -36,7 +40,9 @@ import {
   TX_STATUSES,
   TX_TYPES,
   type Backup,
+  type BackupRows,
 } from "./backup";
+import type { loadBackupRows } from "../db/queries";
 import { cloudLine } from "./finance-core/clouds";
 import { goldPricesFor, type Karat } from "./finance-core/gold";
 import { accountBalance, netWorth, type Tx } from "./finance-core/ledger";
@@ -58,6 +64,8 @@ const SALARY = id(12);
 const LOAN_INTEREST = id(13);
 const TRIP = id(22);
 const EMERGENCY = id(21);
+const RETAINER = id(150); // an auto-posted monthly income template
+const MEAL_PLAN = id(151); // a paused weekly expense template
 const FIXED_RULE = id(51);
 const at = (s: string) => new Date(s);
 type GoldForm = "bar" | "coin" | "jewelry";
@@ -87,6 +95,8 @@ const rows = {
     goldPriceMode: "per_karat" as "derive_24k" | "per_karat",
     staleDaysGold: 10,
     staleDaysClouds: 45,
+    budgetWarnAt: "0.750" as string | number, // numeric columns arrive as text
+    budgetAlertAt: "1.000" as string | number,
   },
   accounts: [
     { ...base, id: BANK, name: "CIB", type: "bank" as const, institution: "CIB", notes: null, isInvestment: false, openingBalance: 5_000_000, archivedAt: null, updatedAt: at("2026-03-02T08:00:00.000Z") },
@@ -124,6 +134,18 @@ const rows = {
     // One loan payment: principal 3,000.00 and interest 120.00, written together with the same createdAt.
     tx(117, { type: "LIABILITY_PAYMENT", date: "2026-03-18", amount: 300_000, fromAccountId: BANK, liabilityId: LOAN, createdAt: at("2026-03-18T09:00:00.000Z") }),
     tx(118, { type: "EXPENSE", date: "2026-03-18", amount: 12_000, fromAccountId: BANK, categoryId: LOAN_INTEREST, liabilityId: LOAN, createdAt: at("2026-03-18T09:00:00.000Z") }),
+    // Generated from templates: an auto-posted income, a pending expense, and a skipped (void) one whose due date stays taken.
+    tx(119, { type: "INCOME", date: "2026-03-05", amount: 100_000, toAccountId: BANK, categoryId: SALARY, note: "Retainer", recurringTemplateId: RETAINER, recurringDueDate: "2026-03-05" }),
+    tx(120, { type: "EXPENSE", date: "2026-03-15", amount: 20_000, fromAccountId: BANK, categoryId: FOOD, status: "pending", note: "Meal plan", recurringTemplateId: MEAL_PLAN, recurringDueDate: "2026-03-15" }),
+    tx(121, { type: "EXPENSE", date: "2026-03-08", amount: 20_000, fromAccountId: BANK, categoryId: FOOD, status: "void", voidedAt: at("2026-03-09T10:00:00.000Z"), note: "Meal plan", recurringTemplateId: MEAL_PLAN, recurringDueDate: "2026-03-08" }),
+  ],
+  budgets: [
+    { ...base, id: id(141), categoryId: null as string | null, amount: 2_000_000, updatedAt: at("2026-03-02T08:00:00.000Z") },
+    { ...base, id: id(142), categoryId: FOOD as string | null, amount: 500_000, updatedAt: base.createdAt },
+  ],
+  recurringTemplates: [
+    { ...base, id: RETAINER, name: "Retainer", type: "INCOME" as "INCOME" | "EXPENSE", amount: 100_000, categoryId: SALARY as string | null, accountId: BANK, frequency: "monthly" as "weekly" | "monthly" | "yearly", startDate: "2026-01-05", endDate: null as string | null, autoPost: true, active: true, note: null as string | null, updatedAt: base.createdAt },
+    { ...base, id: MEAL_PLAN, name: "Meal plan", type: "EXPENSE" as "INCOME" | "EXPENSE", amount: 20_000, categoryId: FOOD as string | null, accountId: BANK, frequency: "weekly" as "weekly" | "monthly" | "yearly", startDate: "2026-03-01", endDate: "2026-12-31" as string | null, autoPost: false, active: false, note: "paused for Ramadan" as string | null, updatedAt: at("2026-03-20T08:00:00.000Z") },
   ],
   holdings: [
     { ...base, ...noGoldOrCloud, id: COMI, accountId: THNDR, kind: "stock" as const, name: "Commercial International Bank", ticker: "COMI", notes: null as string | null, archivedAt: null as Date | null, updatedAt: base.createdAt },
@@ -160,8 +182,8 @@ const rows = {
   ],
   assumptions: { stockReturn: "0.150000" as string | null, goldReturn: null as string | null, savingsCloudApy: "0.120000" as string | null, cashReturn: null as string | null, inflation: "0.250000" as string | null },
   goals: [
-    { ...base, id: EMERGENCY, name: "Emergency fund", targetAmount: 10_000_000, targetDate: "2027-12-31", startDate: "2026-03-01", priority: 1, plannedMonthly: 500_000 as number | null, expectedReturnOverride: "0.120000" as string | null, manualCurrent: null as number | null, notes: "six months", color: "#22aa77", icon: "shield", archivedAt: null as Date | null, updatedAt: at("2026-03-05T08:00:00.000Z") },
-    { ...base, id: TRIP, name: "Trip", targetAmount: 2_000_000, targetDate: "2026-12-01", startDate: "2026-03-01", priority: 2, plannedMonthly: null, expectedReturnOverride: null, manualCurrent: 150_000, notes: null, color: null, icon: null, archivedAt: at("2026-06-01T00:00:00.000Z"), updatedAt: base.createdAt },
+    { ...base, id: EMERGENCY, name: "Emergency fund", targetAmount: 10_000_000, targetMode: "expense_months" as "manual" | "expense_months", targetMonths: 6 as number | null, targetDate: "2027-12-31", startDate: "2026-03-01", priority: 1, plannedMonthly: 500_000 as number | null, expectedReturnOverride: "0.120000" as string | null, manualCurrent: null as number | null, notes: "six months", color: "#22aa77", icon: "shield", archivedAt: null as Date | null, updatedAt: at("2026-03-05T08:00:00.000Z") },
+    { ...base, id: TRIP, name: "Trip", targetAmount: 2_000_000, targetMode: "manual" as const, targetMonths: null, targetDate: "2026-12-01", startDate: "2026-03-01", priority: 2, plannedMonthly: null, expectedReturnOverride: null, manualCurrent: 150_000, notes: null, color: null, icon: null, archivedAt: at("2026-06-01T00:00:00.000Z"), updatedAt: base.createdAt },
   ],
   goalAllocations: [
     { ...base, ...noHolding, id: id(31), goalId: EMERGENCY, accountId: BANK as string | null, amount: 800_000 as number | null, updatedAt: at("2026-03-12T08:00:00.000Z") },
@@ -210,6 +232,8 @@ function tx(n: number, f: Record<string, unknown>) {
     unitPrice: null as string | null,
     liabilityId: null as string | null,
     replacesId: null as string | null,
+    recurringTemplateId: null as string | null,
+    recurringDueDate: null as string | null,
     voidedAt: null as Date | null,
     createdAt: at("2026-03-10T09:00:00.000Z"),
     ...f,
@@ -233,7 +257,7 @@ const balances = (b: { accounts: { id: string; openingBalance: number }[]; trans
 
 describe("backup format", () => {
   it("lists the same enum values as db/schema.ts", () => {
-    expect([ACCOUNT_TYPES, CATEGORY_KINDS, TX_TYPES, TX_STATUSES, SAVINGS_MODES, RULE_KINDS, TARGET_KINDS, HOLDING_KINDS, CORPORATE_ACTION_KINDS, GOLD_FORMS, CONTRIBUTION_FREQUENCIES, GOLD_PRICE_MODES, LIABILITY_KINDS]).toEqual([
+    expect([ACCOUNT_TYPES, CATEGORY_KINDS, TX_TYPES, TX_STATUSES, SAVINGS_MODES, RULE_KINDS, TARGET_KINDS, HOLDING_KINDS, CORPORATE_ACTION_KINDS, GOLD_FORMS, CONTRIBUTION_FREQUENCIES, GOLD_PRICE_MODES, LIABILITY_KINDS, RECURRING_FREQUENCIES, GOAL_TARGET_MODES]).toEqual([
       accountType.enumValues,
       categoryKind.enumValues,
       transactionType.enumValues,
@@ -247,6 +271,8 @@ describe("backup format", () => {
       contributionFrequency.enumValues,
       goldPriceMode.enumValues,
       liabilityKind.enumValues,
+      recurringFrequency.enumValues,
+      goalTargetMode.enumValues,
     ]);
   });
 
@@ -262,8 +288,9 @@ describe("backup format", () => {
 
     const before = balances({ accounts: rows.accounts, transactions: serializeBackup(rows).transactions });
     expect(before).toEqual({
-      // salary - lunch - transfer - COMI buy - fund buy - gold buy - 2 cloud deposits + cloud withdrawal - loan principal - loan interest
-      [BANK]: 5_000_000 + 3_000_000 - 45_050 - 500_000 - 105_150 - 50_000 - 4_005_000 - 1_000_000 - 500_000 + 200_000 - 300_000 - 12_000,
+      // salary + retainer - lunch - transfer - COMI buy - fund buy - gold buy - 2 cloud deposits + cloud withdrawal - loan principal - loan interest
+      // (the pending and skipped meal-plan rows move nothing)
+      [BANK]: 5_000_000 + 3_000_000 + 100_000 - 45_050 - 500_000 - 105_150 - 50_000 - 4_005_000 - 1_000_000 - 500_000 + 200_000 - 300_000 - 12_000,
       [CASH]: 500_000 - 7_500,
       [CARD]: -120_000 - 12_000,
       [THNDR]: 47_850 + 18_000,
@@ -286,6 +313,8 @@ describe("backup format", () => {
       goldPriceMode: "per_karat",
       staleDaysGold: 10,
       staleDaysClouds: 45,
+      budgetWarnAt: 0.75,
+      budgetAlertAt: 1,
     });
     expect(backup.goals.map((g) => g.expectedReturnOverride)).toEqual([0.12, null]);
     expect(backup.allocationRules.map((r) => r.percent)).toEqual([null, 0.25, null]);
@@ -423,7 +452,16 @@ describe("round trip of gold, clouds, loans and holding shares (version 4)", () 
 
 // What the older app versions wrote: v1 has no goals, rules or savings settings; v2 adds them but has no holdings.
 // v3 files have no gold, clouds, liabilities or holding shares: drop them and the columns they added.
+// v4 files have no budgets, recurring templates, expense-based goal targets or budget thresholds.
+const stripV5 = (b: any) => { // eslint-disable-line @typescript-eslint/no-explicit-any
+  for (const key of ["budgets", "recurringTemplates"]) delete b[key];
+  for (const key of ["budgetWarnAt", "budgetAlertAt"]) delete b.settings[key];
+  for (const g of b.goals) for (const key of ["targetMode", "targetMonths"]) delete g[key];
+  for (const t of b.transactions) for (const key of ["recurringTemplateId", "recurringDueDate"]) delete t[key];
+};
+
 const stripV4 = (b: any) => { // eslint-disable-line @typescript-eslint/no-explicit-any
+  stripV5(b);
   for (const key of ["goldPrices", "rateHistory", "cloudConfirmations", "liabilities", "liabilityUpdates"]) delete b[key];
   for (const key of ["goldPriceMode", "staleDaysGold", "staleDaysClouds"]) delete b.settings[key];
   const dropped = new Set(b.holdings.filter((h: any) => h.kind === "gold" || h.kind === "cloud").map((h: any) => h.id)); // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -556,7 +594,10 @@ describe("version 1 files", () => {
       goldPriceMode: "derive_24k",
       staleDaysGold: 14,
       staleDaysClouds: 30,
+      budgetWarnAt: 0.8,
+      budgetAlertAt: 1,
     });
+    expect([b.budgets, b.recurringTemplates]).toEqual([[], []]);
     expect(b.accounts).toEqual(file.accounts);
     expect(balances(b)).toEqual(balances(file));
   });
@@ -592,7 +633,7 @@ describe("parseBackup rejects", () => {
       if (!result.ok) expect(result.error).toContain("JSON object");
     });
     rejects([
-      ["unknown version", (b) => (b.version = 5 as never), "version: 5 is not supported"],
+      ["unknown version", (b) => (b.version = 6 as never), "version: 6 is not supported"],
       ["fractional version", (b) => (b.version = 2.5 as never), "version: 2.5 is not supported"],
       ["version 0", (b) => (b.version = 0 as never), "version: 0 is not supported"],
       ["missing version", (b) => delete b.version, "version: undefined"],
@@ -895,14 +936,14 @@ describe("parseBackup rejects (version 3 additions)", () => {
   // validateHistory runs per holding, so a file with an impossible position is rejected before anything is written.
   describe("impossible positions (rule F)", () => {
     rejects([
-      ["a sale of more than is held", (b) => (trade(b, 1).quantity = "200.000000"), "holdings[0]: impossible position: Cannot sell 200.000000; only 110 held (on 2026-03-20)"],
-      ["a sale dated before the purchase", (b) => (trade(b, 1).date = "2026-02-15"), "holdings[0]: impossible position: Cannot sell 40.000000; only 0 held (on 2026-02-15)"],
-      ["a purchase dated after the sale", (b) => (trade(b, 0).date = "2026-03-21"), "holdings[0]: impossible position"],
-      ["a bonus dated after the sale is not enough to cover it", (b) => ((trade(b, 1).quantity = "105.000000"), (action(b, 0).date = "2026-03-21")), "holdings[0]: impossible position"],
-      ["a reverse split that leaves too little for a later sale", (b) => Object.assign(action(b, 0), { kind: "SPLIT", quantity: null, ratio: "0.1", date: "2026-03-15" }), "holdings[0]: impossible position"],
-      ["a write-off followed by a sale", (b) => Object.assign(action(b, 0), { kind: "WRITE_OFF", quantity: null, date: "2026-03-15" }), "holdings[0]: impossible position: Cannot sell 40.000000; only 0 held (on 2026-03-20)"],
-      ["a dividend whose tax is not below the gross", (b) => (trade(b, 2).taxWithheld = 20_000), "holdings[0]: impossible position"],
-      ["the other holding oversold too", (b) => Object.assign(trade(b, 4), { quantity: "10.000000", date: "2026-03-20", type: "INVESTMENT_SALE", fromAccountId: null, toAccountId: THNDR, holdingId: GOLD_FUND }), "holdings[1]: impossible position"],
+      ["a sale of more than is held", (b) => (trade(b, 1).quantity = "200.000000"), "holdings[0]: the history leaves an impossible position (on 2026-03-20)"],
+      ["a sale dated before the purchase", (b) => (trade(b, 1).date = "2026-02-15"), "holdings[0]: the history leaves an impossible position (on 2026-02-15)"],
+      ["a purchase dated after the sale", (b) => (trade(b, 0).date = "2026-03-21"), "holdings[0]: the history leaves an impossible position"],
+      ["a bonus dated after the sale is not enough to cover it", (b) => ((trade(b, 1).quantity = "105.000000"), (action(b, 0).date = "2026-03-21")), "holdings[0]: the history leaves an impossible position"],
+      ["a reverse split that leaves too little for a later sale", (b) => Object.assign(action(b, 0), { kind: "SPLIT", quantity: null, ratio: "0.1", date: "2026-03-15" }), "holdings[0]: the history leaves an impossible position"],
+      ["a write-off followed by a sale", (b) => Object.assign(action(b, 0), { kind: "WRITE_OFF", quantity: null, date: "2026-03-15" }), "holdings[0]: the history leaves an impossible position (on 2026-03-20)"],
+      ["a dividend whose tax is not below the gross", (b) => (trade(b, 2).taxWithheld = 20_000), "holdings[0]: the history leaves an impossible position"],
+      ["the other holding oversold too", (b) => Object.assign(trade(b, 4), { quantity: "10.000000", date: "2026-03-20", type: "INVESTMENT_SALE", fromAccountId: null, toAccountId: THNDR, holdingId: GOLD_FUND }), "holdings[1]: the history leaves an impossible position"],
     ]);
 
     it("ignores void and pending rows when replaying", () => {
@@ -910,7 +951,7 @@ describe("parseBackup rejects (version 3 additions)", () => {
       // The voided purchase of 5 and a pending sale of 1,000 would break the position if they counted.
       Object.assign(trade(b, 3), { status: "void" });
       Object.assign(trade(b, 1), { status: "void" });
-      b.transactions.push({ ...trade(b, 1), id: id(120), status: "pending", quantity: "1000.000000", voidedAt: null });
+      b.transactions.push({ ...trade(b, 1), id: id(190), status: "pending", quantity: "1000.000000", voidedAt: null });
       expect(parseBackup(b).ok).toBe(true);
     });
 
@@ -1067,16 +1108,16 @@ describe("parseBackup rejects (version 4 additions)", () => {
 
   describe("a cloud withdrawal never exceeds the estimated value (rate history, confirmations, deposits)", () => {
     rejects([
-      ["a withdrawal above everything ever put in", (b) => (withdrawal(b).amount = 5_000_000), "holdings[3]: A withdrawal is larger than the cloud's estimated value (on 2026-03-20)"],
-      ["a withdrawal dated before the second deposit", (b) => Object.assign(withdrawal(b), { date: "2026-03-02", amount: 1_500_000 }), "holdings[3]: A withdrawal is larger than the cloud's estimated value (on 2026-03-02)"],
-      ["a withdrawal on a cloud that has nothing in it", (b) => Object.assign(withdrawal(b), { date: "2026-02-01" }), "holdings[3]: A withdrawal is larger than the cloud's estimated value (on 2026-02-01)"],
+      ["a withdrawal above everything ever put in", (b) => (withdrawal(b).amount = 5_000_000), "holdings[3]: a withdrawal is larger than the cloud's estimated value (on 2026-03-20)"],
+      ["a withdrawal dated before the second deposit", (b) => Object.assign(withdrawal(b), { date: "2026-03-02", amount: 1_500_000 }), "holdings[3]: a withdrawal is larger than the cloud's estimated value (on 2026-03-02)"],
+      ["a withdrawal on a cloud that has nothing in it", (b) => Object.assign(withdrawal(b), { date: "2026-02-01" }), "holdings[3]: a withdrawal is larger than the cloud's estimated value (on 2026-02-01)"],
       [
         "a deposit moved to after the withdrawal that needed it",
         (b) => {
           Object.assign(b.transactions[14], { date: "2026-03-25" });
           withdrawal(b).amount = 1_100_000;
         },
-        "holdings[3]: A withdrawal is larger",
+        "holdings[3]: a withdrawal is larger",
       ],
     ]);
 
@@ -1243,6 +1284,298 @@ describe("parseBackup rejects (version 4 additions)", () => {
       Object.assign(shareEvent(b), { percentDelta: -0.1, delta: -150_000 });
       expect(parseBackup(b).ok).toBe(true);
     });
+  });
+});
+
+const retainerRow = (b: Backup) => b.transactions[18];
+const pendingMeal = (b: Backup) => b.transactions[19];
+const skippedMeal = (b: Backup) => b.transactions[20];
+const overallBudget = (b: Backup) => b.budgets[0];
+const foodBudget = (b: Backup) => b.budgets[1];
+const retainer = (b: Backup) => b.recurringTemplates[0];
+const mealPlan = (b: Backup) => b.recurringTemplates[1];
+const emergencyGoal = (b: Backup) => b.goals[0];
+
+describe("round trip of budgets, recurring templates and expense-based goals (version 5)", () => {
+  it("keeps every new table and column, with thresholds as decimals", () => {
+    const backup = serializeBackup(rows, EXPORTED_AT);
+    expect(backup.version).toBe(5);
+    expect(backup.budgets.map((x) => [x.categoryId, x.amount])).toEqual([[null, 2_000_000], [FOOD, 500_000]]);
+    expect(backup.recurringTemplates.map((t) => [t.name, t.type, t.frequency, t.endDate, t.autoPost, t.active])).toEqual([
+      ["Retainer", "INCOME", "monthly", null, true, true],
+      ["Meal plan", "EXPENSE", "weekly", "2026-12-31", false, false],
+    ]);
+    expect(backup.transactions.slice(18).map((t) => [t.status, t.recurringTemplateId, t.recurringDueDate])).toEqual([
+      ["posted", RETAINER, "2026-03-05"],
+      ["pending", MEAL_PLAN, "2026-03-15"],
+      ["void", MEAL_PLAN, "2026-03-08"],
+    ]);
+    expect(backup.goals.map((g) => [g.targetMode, g.targetMonths])).toEqual([["expense_months", 6], ["manual", null]]);
+    expect([backup.settings.budgetWarnAt, backup.settings.budgetAlertAt]).toEqual([0.75, 1]);
+    expect(JSON.stringify(backup)).not.toContain("user-1");
+    expect(parseBackup(JSON.parse(JSON.stringify(backup)))).toEqual({ ok: true, backup });
+  });
+
+  it("restores a pending row as pending: only the posted income counts toward the balance", () => {
+    const parsed = parseBackup(JSON.parse(JSON.stringify(serializeBackup(rows, EXPORTED_AT))));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.backup.transactions.slice(18).map((t) => t.status)).toEqual(["posted", "pending", "void"]);
+    expect(balances(parsed.backup)[BANK]).toBe(balances(serializeBackup(rows, EXPORTED_AT))[BANK]);
+  });
+});
+
+describe("version 4 files", () => {
+  const v4 = () => {
+    const b: any = valid(); // eslint-disable-line @typescript-eslint/no-explicit-any
+    stripV5(b);
+    b.version = 4;
+    return b;
+  };
+
+  it("still restore, with no budgets or templates, manual goals, unlinked transactions and the default thresholds", () => {
+    const file = v4();
+    const parsed = parseBackup(file);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const b = parsed.backup;
+    expect(b.version).toBe(BACKUP_VERSION);
+    expect([b.budgets, b.recurringTemplates]).toEqual([[], []]);
+    expect(b.goals.every((g) => g.targetMode === "manual" && g.targetMonths === null)).toBe(true);
+    expect(b.transactions.every((t) => t.recurringTemplateId === null && t.recurringDueDate === null)).toBe(true);
+    expect([b.settings.budgetWarnAt, b.settings.budgetAlertAt]).toEqual([0.8, 1]);
+    expect(b.liabilities).toHaveLength(1);
+    expect(balances(b)).toEqual(balances(file));
+  });
+
+  it("are still validated like before", () => {
+    const file = v4();
+    file.liabilities[0].openingBalance = 0;
+    expect(parseBackup(file)).toMatchObject({ ok: false });
+  });
+
+  it("ignore new-format fields they should not have", () => {
+    const file = v4();
+    file.transactions[0].recurringTemplateId = id(99);
+    file.goals[0].targetMode = "expense_months";
+    file.settings.budgetWarnAt = 5;
+    const parsed = parseBackup(file);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect([parsed.backup.transactions[0].recurringTemplateId, parsed.backup.goals[0].targetMode, parsed.backup.settings.budgetWarnAt]).toEqual([null, "manual", 0.8]);
+    }
+  });
+});
+
+describe("parseBackup rejects (version 5 additions)", () => {
+  describe("a version 5 file with a missing collection", () => {
+    rejects([
+      ["budgets missing", (b) => delete b.budgets, "budgets: must be a list"],
+      ["recurringTemplates not a list", (b) => (b.recurringTemplates = {} as never), "recurringTemplates: must be a list"],
+    ]);
+  });
+
+  describe("budgets (budgets_amount_check, one overall, one per category)", () => {
+    rejects([
+      ["amount zero", (b) => (overallBudget(b).amount = 0), "budgets[0].amount: must be above zero"],
+      ["amount negative", (b) => (foodBudget(b).amount = -1), "budgets[1].amount: must be above zero"],
+      ["amount with a fraction", (b) => (overallBudget(b).amount = 10.5), "budgets[0].amount"],
+      ["a second overall budget", (b) => b.budgets.push({ ...overallBudget(b), id: id(143) }), "budgets: at most one overall budget"],
+      ["two budgets for one category", (b) => b.budgets.push({ ...foodBudget(b), id: id(143) }), "budgets (category): appears twice"],
+      ["a budget of an unknown category", (b) => (foodBudget(b).categoryId = id(99)), "budgets[1].categoryId: refers to a category that is not in the file"],
+      ["duplicate id", (b) => (foodBudget(b).id = id(141)), "budgets.id: appears twice"],
+    ]);
+
+    it("accepts budgets of several categories, and none at all", () => {
+      const b = valid();
+      b.budgets.push({ ...foodBudget(b), id: id(143), categoryId: LOAN_INTEREST });
+      expect(parseBackup(b).ok).toBe(true);
+      b.budgets = [];
+      expect(parseBackup(b).ok).toBe(true);
+    });
+  });
+
+  describe("recurring templates (recurring_templates_*_check, references)", () => {
+    rejects([
+      ["amount zero", (b) => (retainer(b).amount = 0), "recurringTemplates[0].amount: must be above zero"],
+      ["amount with a fraction", (b) => (retainer(b).amount = 0.5), "recurringTemplates[0].amount"],
+      ["type TRANSFER", (b) => (retainer(b).type = "TRANSFER" as never), "recurringTemplates[0].type: must be one of INCOME, EXPENSE"],
+      ["frequency daily", (b) => (retainer(b).frequency = "daily" as never), "recurringTemplates[0].frequency: must be one of"],
+      ["end date before the start date", (b) => (mealPlan(b).endDate = "2026-02-28"), "recurringTemplates[1].endDate: must not be before the start date"],
+      ["impossible start date", (b) => (retainer(b).startDate = "2026-02-30"), "recurringTemplates[0].startDate: must be a real date"],
+      ["unknown account", (b) => (retainer(b).accountId = id(99)), "recurringTemplates[0].accountId: refers to an account that is not in the file"],
+      ["unknown category", (b) => (retainer(b).categoryId = id(99)), "recurringTemplates[0].categoryId: refers to a category that is not in the file"],
+      ["auto post given as text", (b) => (retainer(b).autoPost = "yes" as never), "recurringTemplates[0].autoPost"],
+      ["active missing", (b) => delete b.recurringTemplates[0].active, "recurringTemplates[0].active"],
+      ["empty name", (b) => (retainer(b).name = " "), "recurringTemplates[0].name: must not be empty"],
+      ["duplicate id", (b) => (mealPlan(b).id = RETAINER), "recurringTemplates.id: appears twice"],
+    ]);
+
+    it("accepts a template with no category, no end date, and one ending on its start date", () => {
+      const b = valid();
+      Object.assign(retainer(b), { categoryId: null });
+      Object.assign(mealPlan(b), { endDate: mealPlan(b).startDate });
+      expect(parseBackup(b).ok).toBe(true);
+    });
+  });
+
+  describe("recurring links on transactions (transactions_recurring_check, one row per template and due date)", () => {
+    rejects([
+      ["a template without a due date", (b) => (retainerRow(b).recurringDueDate = null), "transactions[18]: recurringTemplateId and recurringDueDate are set together or not at all"],
+      ["a due date without a template", (b) => (retainerRow(b).recurringTemplateId = null), "set together or not at all"],
+      ["an unknown template", (b) => (retainerRow(b).recurringTemplateId = id(99)), "transactions[18].recurringTemplateId: refers to a recurring template that is not in the file"],
+      ["an impossible due date", (b) => (retainerRow(b).recurringDueDate = "2026-02-30"), "transactions[18].recurringDueDate: must be a real date"],
+      ["a due date taken twice (the first one pending, the second skipped)", (b) => (skippedMeal(b).recurringDueDate = "2026-03-15"), "transactions (recurring template and due date): appears twice"],
+      ["a due date taken twice by posted rows", (b) => b.transactions.push({ ...retainerRow(b), id: id(160), createdAt: "2026-03-06T09:00:00.000Z" }), "transactions (recurring template and due date): appears twice"],
+    ]);
+
+    it("accepts the same due date on two templates, and a skipped row whose date moved away from its due date", () => {
+      const b = valid();
+      Object.assign(skippedMeal(b), { recurringTemplateId: RETAINER, recurringDueDate: "2026-03-15" });
+      expect(parseBackup(b).ok).toBe(true);
+      Object.assign(pendingMeal(b), { date: "2026-04-02" });
+      expect(parseBackup(b).ok).toBe(true);
+    });
+  });
+
+  describe("expense-based goal targets (goals_target_mode_check)", () => {
+    rejects([
+      ["expense_months without months", (b) => (emergencyGoal(b).targetMonths = null), "goals[0]: targetMonths is set exactly when targetMode is expense_months"],
+      ["manual with months", (b) => (b.goals[1].targetMonths = 6), "goals[1]: targetMonths is set exactly when targetMode is expense_months"],
+      ["mode outside the enum", (b) => (emergencyGoal(b).targetMode = "weekly" as never), "goals[0].targetMode: must be one of"],
+      ["0 months", (b) => (emergencyGoal(b).targetMonths = 0), "goals[0].targetMonths: must be a whole number from 1 to 60"],
+      ["61 months", (b) => (emergencyGoal(b).targetMonths = 61), "goals[0].targetMonths: must be a whole number from 1 to 60"],
+      ["months with a fraction", (b) => (emergencyGoal(b).targetMonths = 6.5), "goals[0].targetMonths"],
+    ]);
+
+    it("accepts 1 and 60 months", () => {
+      const b = valid();
+      emergencyGoal(b).targetMonths = 1;
+      expect(parseBackup(b).ok).toBe(true);
+      emergencyGoal(b).targetMonths = 60;
+      expect(parseBackup(b).ok).toBe(true);
+    });
+  });
+
+  describe("budget thresholds (user_settings_budget_thresholds_check)", () => {
+    rejects([
+      ["warning of zero", (b) => (b.settings.budgetWarnAt = 0), "settings: budgetWarnAt must be above 0"],
+      ["warning above the alert", (b) => (b.settings.budgetWarnAt = 1.1), "settings: budgetWarnAt must be above 0, no higher than budgetAlertAt"],
+      ["alert above 200%", (b) => (b.settings.budgetAlertAt = 2.5), "settings: budgetWarnAt must be above 0"],
+      ["warning with 4 decimals", (b) => (b.settings.budgetWarnAt = 0.7501), "settings.budgetWarnAt: must have at most 3 decimals"],
+      ["alert as text", (b) => (b.settings.budgetAlertAt = "100%" as never), "settings.budgetAlertAt"],
+      ["warning missing", (b) => delete b.settings.budgetWarnAt, "settings.budgetWarnAt"],
+    ]);
+
+    it("accepts a warning equal to the alert, and an alert of exactly 200%", () => {
+      const b = valid();
+      Object.assign(b.settings, { budgetWarnAt: 2, budgetAlertAt: 2 });
+      expect(parseBackup(b).ok).toBe(true);
+    });
+  });
+});
+
+describe("parseBackup rejects a liability whose balance goes below zero (opening balance plus manual updates)", () => {
+  const update = (b: Backup, n: number, date: string, delta: number, createdAt = `${date}T09:00:00.000Z`) =>
+    b.liabilityUpdates.push({ id: id(n), liabilityId: LOAN, date, delta, note: null, createdAt });
+
+  const owed = (b: Backup) =>
+    b.liabilities[0].openingBalance + b.liabilityUpdates.filter((u) => u.liabilityId === LOAN).reduce((t, u) => t + u.delta, 0);
+
+  rejects([
+    ["a correction larger than everything owed", (b) => (b.liabilityUpdates[1].delta = -1_600_000), "liabilities[0]: the manual updates take the balance below zero"],
+  ]);
+
+  const paid = (b: Backup) =>
+    b.transactions
+      .filter((t) => t.type === "LIABILITY_PAYMENT" && t.status === "posted" && t.liabilityId === LOAN)
+      .reduce((t, x) => t + x.amount, 0);
+
+  // The app checks the total, not the order of dates, so a file it produced must restore.
+  it("accepts a correction dated before the borrowing that covers it", () => {
+    const b = valid();
+    const dip = b.liabilities[0].openingBalance + 1; // on its own date this takes the running balance below zero
+    update(b, 133, "2026-01-01", -dip);
+    update(b, 134, "2026-06-01", dip);
+    expect(parseBackup(b).ok).toBe(true);
+  });
+
+  it("accepts a balance that reaches exactly zero, and refuses a piaster below", () => {
+    const b = valid();
+    update(b, 133, "2026-03-25", -(owed(b) - paid(b)));
+    expect(parseBackup(b).ok).toBe(true);
+    b.liabilityUpdates[b.liabilityUpdates.length - 1].delta -= 1;
+    expect(parseBackup(b)).toMatchObject({ ok: false });
+  });
+
+  it("does not look at the balance of another liability", () => {
+    const b = valid();
+    b.liabilities.push({ ...b.liabilities[0], id: id(61), name: "Second loan" });
+    expect(parseBackup(b).ok).toBe(true);
+  });
+});
+
+// Error text is shown as plain text, which privacy mode does not hide: only the row path and a date may carry digits.
+describe("restore errors never quote quantities, grams or amounts", () => {
+  const strip = (message: string) => message.replace(/[A-Za-z]+\[\d+\]/g, "").replace(/\d{4}-\d{2}-\d{2}/g, "");
+  const goldSale = (b: Backup, quantity: string) =>
+    b.transactions.push({
+      ...goldBuy(b),
+      id: id(170),
+      type: "INVESTMENT_SALE",
+      date: "2026-03-20",
+      amount: 1,
+      fee: 0,
+      grossAmount: 1,
+      fromAccountId: null,
+      toAccountId: THNDR,
+      quantity,
+      unitPrice: "0.000001",
+      createdAt: "2026-03-20T09:00:00.000Z",
+    });
+
+  it.each<[string, Mutate, string]>([
+    ["selling more units than held", (b) => (trade(b, 1).quantity = "200.123456"), "holdings[0]: the history leaves an impossible position (on 2026-03-20)"],
+    ["selling more grams of gold than held", (b) => goldSale(b, "15.500000"), "holdings[2]: the history leaves an impossible position (on 2026-03-20)"],
+    ["a purchase too large to price", (b) => Object.assign(trade(b, 0), { quantity: "99999999999999.999999", unitPrice: "99999999999999.999999" }), "holdings[0]: the history leaves an impossible position"],
+    ["a sale whose fee exceeds its proceeds", (b) => (trade(b, 1).fee = 4_000_000), "holdings[0]: the history leaves an impossible position"],
+    [
+      "a cloud too large to value",
+      (b) => {
+        b.cloudConfirmations[0].value = 8_000_000_000_000_000;
+        b.rateHistory[0].apy = 99;
+      },
+      "holdings[3]: cannot be valued",
+    ],
+    ["a cloud withdrawal above its value", (b) => (withdrawal(b).amount = 5_000_000), "holdings[3]: a withdrawal is larger than the cloud's estimated value (on 2026-03-20)"],
+    ["a loan payment above the balance", (b) => (principal(b).amount = 2_000_000), "liabilities[0]: a principal payment is larger than the balance outstanding (on 2026-03-18)"],
+    ["a loan correction below zero", (b) => (b.liabilityUpdates[1].delta = -1_600_000), "liabilities[0]: the manual updates take the balance below zero"],
+    ["a purchase paid a piaster more", (b) => (trade(b, 0).amount += 1), "transactions[7].amount: does not equal quantity x unitPrice plus fee"],
+    ["a sale with the wrong gross", (b) => (trade(b, 1).grossAmount = 48_001), "transactions[8].grossAmount: does not equal quantity x unitPrice"],
+  ])("%s", (_name, mutate, expected) => {
+    const b = valid();
+    mutate(b);
+    const result = parseBackup(b);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toContain(expected);
+    expect(strip(result.error)).not.toMatch(/\d/);
+  });
+});
+
+// A compile-time check as much as a test: tsc fails if the export route's loader leaves a table out.
+describe("the export route", () => {
+  type RouteRows = Awaited<ReturnType<typeof loadBackupRows>>;
+  type TablesNobodySerializes = Exclude<keyof Backup, "version" | "exportedAt" | keyof BackupRows>;
+
+  it("builds every table serializeBackup takes, and serializeBackup takes every table the backup holds", () => {
+    const routeFeedsSerializer = (rowsFromRoute: RouteRows): BackupRows => rowsFromRoute;
+    const noTableLeftOut: [TablesNobodySerializes] extends [never] ? true : never = true;
+    expect(routeFeedsSerializer).toBeTypeOf("function");
+    expect(noTableLeftOut).toBe(true);
+    expect(Object.keys(serializeBackup(rows, EXPORTED_AT)).sort()).toEqual(
+      ["version", "exportedAt", ...(Object.keys(rows) as (keyof BackupRows)[])].sort(),
+    );
   });
 });
 

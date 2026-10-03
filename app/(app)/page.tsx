@@ -2,18 +2,21 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 import { AccountList } from "@/components/AccountList";
 import { Amount } from "@/components/Amount";
+import { BudgetSummary } from "@/components/BudgetParts";
 import { formatRange } from "@/components/dates";
 import { EmptyState } from "@/components/EmptyState";
 import { GoalCard } from "@/components/GoalCard";
 import { GoalPlanCard } from "@/components/GoalPlanCard";
 import { HoldingPL } from "@/components/HoldingPL";
 import { card } from "@/components/ui";
-import { accountBalances, getSettings, listAccounts, listTransactions, toLedgerTx } from "@/db/queries";
+import { accountBalances, getSettings, listAccounts, listPendingRecurring, listTransactions, loadMonth, toLedgerTx } from "@/db/queries";
 import { requireUserId } from "@/lib/auth";
 import { filterByDateRange, netWorth, periodSummary } from "@/lib/finance-core/ledger";
 import { cairoToday, financialMonth } from "@/lib/finance-core/time";
 import { loadGoalData } from "./goals/data";
 import { holdingsByAccount, loadInvestments } from "./investments/data";
+import { syncRecurring } from "./more/recurring/sync";
+import { loadBudgetLines } from "./spending/data";
 
 function Stat({ label, className, children }: { label: string; className?: string; children: ReactNode }) {
   return (
@@ -26,6 +29,7 @@ function Stat({ label, className, children }: { label: string; className?: strin
 
 export default async function Home() {
   const userId = await requireUserId();
+  await syncRecurring(userId);
   const today = cairoToday();
   const [accounts, txRows, settings, inv] = await Promise.all([
     listAccounts(userId, { includeArchived: true }),
@@ -68,6 +72,11 @@ export default async function Home() {
   const month = periodSummary(filterByDateRange(txRows.map(toLedgerTx), start, end));
   const percent = month.savingsRate === null ? null : Math.round(month.savingsRate * 100);
   const rate = percent === null ? "—" : `${percent < 0 ? "−" : ""}${Math.abs(percent)}%`;
+
+  const [monthData, pendingItems] = await Promise.all([loadMonth(userId, { start, end }), listPendingRecurring(userId)]);
+  const budgetLines = (await loadBudgetLines(userId, monthData, today, new Map())).lines;
+  const overallBudget = budgetLines.find((l) => l.categoryId === null);
+  const watched = budgetLines.filter((l) => l.categoryId !== null && l.status.level !== "ok").length;
 
   const goalData = await loadGoalData(userId, { accounts, txRows, monthStartDay: settings.monthStartDay, wealth: inv.wealth });
   const activeGoals = goalData.goals.filter((v) => !v.goal.archivedAt);
@@ -122,6 +131,15 @@ export default async function Home() {
         )}
       </div>
 
+      {pendingItems.length > 0 && (
+        <p role="status" className={`mt-6 p-4 ${card}`}>
+          {pendingItems.length === 1 ? "1 recurring item is" : `${pendingItems.length} recurring items are`} waiting for your OK.{" "}
+          <Link href="/spending" className="inline-flex min-h-11 items-center font-medium underline">
+            Review in Spending
+          </Link>
+        </p>
+      )}
+
       <section className={`mt-8 p-5 ${card}`}>
         <div className="flex items-baseline justify-between gap-3">
           <h2 className="text-lg font-semibold tracking-tight">This month</h2>
@@ -145,6 +163,24 @@ export default async function Home() {
             </span>
           </Stat>
         </dl>
+        <div className="mt-5 border-t border-border pt-4">
+          <div className="mb-2 flex items-baseline justify-between gap-3">
+            <h3 className="text-sm text-muted">Monthly budget</h3>
+            <Link href={overallBudget ? "/spending" : "/more/budgets"} className="inline-flex min-h-11 items-center text-sm underline">
+              {overallBudget ? "Details" : "Set a budget"}
+            </Link>
+          </div>
+          {overallBudget ? (
+            <BudgetSummary status={overallBudget.status} />
+          ) : (
+            <p className="text-sm text-muted">No overall budget set.</p>
+          )}
+          {watched > 0 && (
+            <p className="mt-2 text-sm text-spending">
+              ▲ {watched} category {watched === 1 ? "budget is" : "budgets are"} close to or over the limit.
+            </p>
+          )}
+        </div>
       </section>
 
       <section className={`mt-8 p-5 ${card}`}>

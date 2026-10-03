@@ -71,6 +71,8 @@ export const corporateActionKind = pgEnum("corporate_action_kind", ["BONUS", "SP
 export const savingsTargetMode = pgEnum("savings_target_mode", ["fixed", "percentage", "flexible"]);
 export const allocationRuleKind = pgEnum("allocation_rule_kind", ["fixed", "percentage", "remainder"]);
 export const allocationTargetKind = pgEnum("allocation_target_kind", ["goal", "investments", "cash"]);
+export const recurringFrequency = pgEnum("recurring_frequency", ["weekly", "monthly", "yearly"]);
+export const goalTargetMode = pgEnum("goal_target_mode", ["manual", "expense_months"]);
 
 export const userSettings = pgTable(
   "user_settings",
@@ -86,6 +88,9 @@ export const userSettings = pgTable(
     goldPriceMode: goldPriceMode("gold_price_mode").notNull().default("derive_24k"),
     staleDaysGold: integer("stale_days_gold").notNull().default(14),
     staleDaysClouds: integer("stale_days_clouds").notNull().default(30),
+    // Share of a budget spent at which it warns / alerts (0.8 = 80%).
+    budgetWarnAt: numeric("budget_warn_at", { precision: 4, scale: 3 }).notNull().default("0.8"),
+    budgetAlertAt: numeric("budget_alert_at", { precision: 4, scale: 3 }).notNull().default("1.0"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -94,6 +99,7 @@ export const userSettings = pgTable(
     check("user_settings_stale_days_holdings_range", sql`stale_days_holdings between 1 and 365`),
     check("user_settings_stale_days_gold_range", sql`stale_days_gold between 1 and 365`),
     check("user_settings_stale_days_clouds_range", sql`stale_days_clouds between 1 and 365`),
+    check("user_settings_budget_thresholds_check", sql`budget_warn_at > 0 and budget_warn_at <= budget_alert_at and budget_alert_at <= 2`),
     ownerOnly("user_settings"),
   ],
 ).enableRLS();
@@ -228,6 +234,56 @@ export const liabilityUpdates = pgTable(
   ],
 ).enableRLS();
 
+// Standing amounts, not per-month rows. One overall budget (category_id null) and at most one per expense category.
+export const budgets = pgTable(
+  "budgets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: userId(),
+    categoryId: uuid("category_id").references(() => categories.id),
+    amount: piasters("amount").notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    check("budgets_amount_check", sql`${t.amount} > 0`),
+    uniqueIndex("budgets_user_category_idx").on(t.userId, t.categoryId).where(sql`${t.categoryId} is not null`),
+    uniqueIndex("budgets_one_overall_idx").on(t.userId).where(sql`${t.categoryId} is null`),
+    ownerOnly("budgets"),
+  ],
+).enableRLS();
+
+// A rule that generates ledger rows lazily (see lib/finance-core/recurring.ts). Editing it affects future occurrences only.
+export const recurringTemplates = pgTable(
+  "recurring_templates",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: userId(),
+    name: text("name").notNull(),
+    type: transactionType("type").notNull(),
+    amount: piasters("amount").notNull(),
+    categoryId: uuid("category_id").references(() => categories.id),
+    // Receives the money for INCOME, pays it for EXPENSE.
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id),
+    frequency: recurringFrequency("frequency").notNull(),
+    startDate: date("start_date", { mode: "string" }).notNull(),
+    endDate: date("end_date", { mode: "string" }),
+    autoPost: boolean("auto_post").notNull().default(false),
+    active: boolean("active").notNull().default(true),
+    note: text("note"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    check("recurring_templates_type_check", sql`${t.type} in ('INCOME', 'EXPENSE')`),
+    check("recurring_templates_amount_check", sql`${t.amount} > 0`),
+    check("recurring_templates_dates_check", sql`${t.endDate} is null or ${t.endDate} >= ${t.startDate}`),
+    ownerOnly("recurring_templates"),
+  ],
+).enableRLS();
+
 export const transactions = pgTable(
   "transactions",
   {
@@ -251,6 +307,8 @@ export const transactions = pgTable(
     unitPrice: decimal6("unit_price"),
     liabilityId: uuid("liability_id").references(() => liabilities.id),
     replacesId: uuid("replaces_id").references((): AnyPgColumn => transactions.id),
+    recurringTemplateId: uuid("recurring_template_id").references(() => recurringTemplates.id),
+    recurringDueDate: date("recurring_due_date", { mode: "string" }),
     voidedAt: timestamp("voided_at", { withTimezone: true }),
     createdAt: createdAt(),
   },
@@ -294,6 +352,12 @@ export const transactions = pgTable(
           and ${t.quantity} is null and ${t.unitPrice} is null
       )`,
     ),
+    check(
+      "transactions_recurring_check",
+      sql`(${t.recurringTemplateId} is null) = (${t.recurringDueDate} is null)`,
+    ),
+    // Regardless of status: a skipped (void) occurrence must never be generated again. NULL template ids never collide.
+    uniqueIndex("transactions_recurring_occurrence_idx").on(t.recurringTemplateId, t.recurringDueDate),
     index("transactions_user_date_idx").on(t.userId, t.date),
     index("transactions_from_account_idx").on(t.fromAccountId),
     index("transactions_to_account_idx").on(t.toAccountId),
@@ -437,6 +501,9 @@ export const goals = pgTable(
     userId: userId(),
     name: text("name").notNull(),
     targetAmount: piasters("target_amount").notNull(),
+    // expense_months: target = targetMonths x average monthly essential spending; targetAmount is then the fallback / last computed value.
+    targetMode: goalTargetMode("target_mode").notNull().default("manual"),
+    targetMonths: integer("target_months"),
     targetDate: date("target_date", { mode: "string" }).notNull(),
     startDate: date("start_date", { mode: "string" }).notNull(),
     priority: integer("priority").notNull(),
@@ -452,6 +519,11 @@ export const goals = pgTable(
   },
   (t) => [
     check("goals_target_amount_check", sql`${t.targetAmount} > 0`),
+    check(
+      "goals_target_mode_check",
+      sql`(${t.targetMode} = 'expense_months') = (${t.targetMonths} is not null)
+        and (${t.targetMonths} is null or ${t.targetMonths} between 1 and 60)`,
+    ),
     check("goals_priority_check", sql`${t.priority} >= 1`),
     check("goals_planned_monthly_check", sql`${t.plannedMonthly} is null or ${t.plannedMonthly} >= 0`),
     check("goals_manual_current_check", sql`${t.manualCurrent} is null or ${t.manualCurrent} >= 0`),

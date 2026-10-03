@@ -5,6 +5,9 @@ import { signOut } from "@/app/login/actions";
 export const metadata: Metadata = { title: "More" };
 
 const links = [
+  { href: "/more/review", title: "Monthly review", hint: "How the month went: saved, invested, net worth change" },
+  { href: "/more/budgets", title: "Budgets", hint: "What you plan to spend each month, and warning levels" },
+  { href: "/more/recurring", title: "Recurring", hint: "Bills and income that repeat" },
   { href: "/more/accounts", title: "Accounts", hint: "Balances, add or archive an account" },
   { href: "/more/liabilities", title: "Loans", hint: "Loans and money you owe, payments" },
   { href: "/more/categories", title: "Categories", hint: "What you spend on and earn from" },

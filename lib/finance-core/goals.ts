@@ -30,6 +30,29 @@ export function shareValue(holdingValue: Piasters, percent: string): Piasters {
   return Number(divRound(BigInt(holdingValue) * toShare(percent), SCALE));
 }
 
+/**
+ * Values of several shares of ONE holding that never add up to more than the holding: each share is floored, then the
+ * piasters left over go to the largest fractional parts (ties: the earlier share). Parts sum to the rounded total share
+ * x value, so exactly the holding's value when the shares total 100%. Shares must total at most 100%.
+ */
+export function shareValues(holdingValue: Piasters, percents: string[]): Piasters[] {
+  if (!Number.isSafeInteger(holdingValue) || holdingValue < 0) throw new RangeError(`Holding value must be a non-negative integer of piasters: ${holdingValue}`);
+  const shares = percents.map(toShare);
+  const totalShare = shares.reduce((s, x) => s + x, BigInt(0));
+  if (totalShare > SCALE) throw new RangeError("Shares of one holding total more than 100%");
+  const exact = shares.map((x) => BigInt(holdingValue) * x);
+  const floors = exact.map((n) => n / SCALE);
+  let left = Number(divRound(BigInt(holdingValue) * totalShare, SCALE) - floors.reduce((s, f) => s + f, BigInt(0)));
+  const parts = floors.map(Number);
+  exact
+    .map((n, i) => ({ i, rem: n % SCALE }))
+    .sort((a, b) => (a.rem === b.rem ? a.i - b.i : a.rem > b.rem ? -1 : 1))
+    .forEach(({ i }) => {
+      if (left-- > 0) parts[i] += 1;
+    });
+  return parts;
+}
+
 /** What a goal holds from one source: cash earmarked on an account, or a percentage share of a holding's current value. */
 export type AllocationSource =
   | { kind: "cash"; amount: Piasters }
@@ -247,4 +270,28 @@ export function trailingCapacity(
   const income = roundPiasters(sum(last.map((m) => m.income)) / TRAILING_MONTHS);
   const spending = roundPiasters(sum(last.map((m) => m.spending)) / TRAILING_MONTHS);
   return { income, spending, capacity: income - spending };
+}
+
+const ESSENTIAL_MONTHS = 6;
+
+export type EmergencyTarget =
+  | { kind: "target"; target: Piasters; monthlyEssential: Piasters; monthsUsed: number }
+  | { kind: "not-enough-history" };
+
+/**
+ * E1. `months` x average monthly essential spending over the last 6 full financial months (oldest first, current month
+ * excluded); with fewer than 6, the average of those that exist. None -> not-enough-history, so the caller falls back to
+ * the manual target. Rounded once, after multiplying.
+ */
+export function emergencyTarget(input: { months: number; essentialMonthlyTotals: Piasters[] }): EmergencyTarget {
+  if (!Number.isInteger(input.months) || input.months < 1 || input.months > 60) throw new RangeError(`Months must be 1-60: ${input.months}`);
+  const last = input.essentialMonthlyTotals.slice(-ESSENTIAL_MONTHS);
+  if (last.length === 0) return { kind: "not-enough-history" };
+  const total = sum(last);
+  return {
+    kind: "target",
+    target: roundPiasters((total * input.months) / last.length),
+    monthlyEssential: roundPiasters(total / last.length),
+    monthsUsed: last.length,
+  };
 }

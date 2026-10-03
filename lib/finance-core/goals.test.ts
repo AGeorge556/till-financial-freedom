@@ -4,6 +4,7 @@ import {
   actualContribution,
   attributeOverAllocation,
   blendedReturn,
+  emergencyTarget,
   goalCurrentAmount,
   goalProjection,
   holdingFreeShare,
@@ -11,6 +12,7 @@ import {
   plannedMonthly,
   shareChangeEvent,
   shareValue,
+  shareValues,
   sourceReturn,
   trailingCapacity,
   validateAllocationChange,
@@ -398,5 +400,72 @@ describe("trailingCapacity", () => {
       { income: 101, spending: 401, full: true },
     ]);
     expect(result).toEqual({ income: 100, spending: 400, capacity: -300 });
+  });
+});
+
+describe("shareValues", () => {
+  const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+
+  it("independent half-up rounding overshoots the holding; largest remainder does not", () => {
+    // 0.5 piaster each, twice: shareValue rounds both up to 1 and 2 > 1 piaster.
+    expect(sum([shareValue(1, "0.5"), shareValue(1, "0.5")])).toBe(2);
+    expect(shareValues(1, ["0.5", "0.5"])).toEqual([1, 0]);
+    expect(shareValues(2, ["0.25", "0.25", "0.25", "0.25"])).toEqual([1, 1, 0, 0]);
+  });
+
+  it.each([
+    [egp(40_000), ["0.25", "0.75"], [egp(10_000), egp(30_000)]],
+    [100, ["0.333333", "0.333333", "0.333334"], [33, 33, 34]],
+    [10, ["0.333333", "0.333333", "0.333334"], [3, 3, 4]],
+    [7, ["0.5", "0.5"], [4, 3]], // exact 3.5 each: the earlier share gets the extra piaster
+    [5, ["1"], [5]],
+    [0, ["0.4", "0.6"], [0, 0]],
+    [123_457, ["0.1", "0.2", "0.3", "0.4"], [12_346, 24_691, 37_037, 49_383]], // exact .7, .4, .1, .8
+  ])("%i over %j -> %j, summing to the holding at 100%", (value, shares, expected) => {
+    const parts = shareValues(value, shares);
+    expect(parts).toEqual(expected);
+    expect(sum(parts)).toBe(value);
+  });
+
+  it("under 100% the parts sum to the rounded total share and never exceed the holding", () => {
+    const parts = shareValues(1_000, ["0.1234", "0.2345"]);
+    expect(sum(parts)).toBe(358); // 35.79% of 1,000 = 357.9
+    expect(sum(parts)).toBeLessThanOrEqual(1_000);
+    expect(shareValues(3, ["0.5"])).toEqual([2]); // single share = shareValue
+    expect(shareValues(1, ["0.4"])).toEqual([0]);
+  });
+
+  it("each part is within one piaster of its exact value", () => {
+    const shares = ["0.123457", "0.234567", "0.345679", "0.296297"];
+    const value = 987_654_321;
+    shareValues(value, shares).forEach((part, i) => {
+      const exact = (value * Number(shares[i])) ;
+      expect(Math.abs(part - exact)).toBeLessThan(1);
+    });
+  });
+
+  it("is empty for no shares and refuses bad input", () => {
+    expect(shareValues(100, [])).toEqual([]);
+    expect(() => shareValues(100, ["0.6", "0.5"])).toThrow(RangeError);
+    expect(() => shareValues(-1, ["0.5"])).toThrow(RangeError);
+    expect(() => shareValues(1.5, ["0.5"])).toThrow(RangeError);
+    expect(() => shareValues(100, ["0.1234567"])).toThrow(RangeError);
+  });
+});
+
+describe("emergencyTarget (E1)", () => {
+  it.each([
+    ["no history", 3, [], { kind: "not-enough-history" }],
+    ["one full month", 3, [egp(10_000)], { kind: "target", target: egp(30_000), monthlyEssential: egp(10_000), monthsUsed: 1 }],
+    ["fewer than 6: average of what exists", 6, [egp(10_000), egp(12_000)], { kind: "target", target: egp(66_000), monthlyEssential: egp(11_000), monthsUsed: 2 }],
+    ["exactly 6", 3, [egp(1_000), egp(2_000), egp(3_000), egp(4_000), egp(5_000), egp(6_000)], { kind: "target", target: egp(10_500), monthlyEssential: egp(3_500), monthsUsed: 6 }],
+    ["more than 6: only the latest 6", 3, [egp(90_000), egp(1_000), egp(2_000), egp(3_000), egp(4_000), egp(5_000), egp(6_000)], { kind: "target", target: egp(10_500), monthlyEssential: egp(3_500), monthsUsed: 6 }],
+    ["rounded once, after multiplying", 3, [1, 1, 2], { kind: "target", target: 4, monthlyEssential: 1, monthsUsed: 3 }], // 4/3 x 3 = 4, not 1 x 3
+  ])("%s", (_name, months, totals, expected) => {
+    expect(emergencyTarget({ months, essentialMonthlyTotals: totals })).toEqual(expected);
+  });
+
+  it.each([0, 61, 1.5])("refuses %s months", (months) => {
+    expect(() => emergencyTarget({ months, essentialMonthlyTotals: [100] })).toThrow(RangeError);
   });
 });

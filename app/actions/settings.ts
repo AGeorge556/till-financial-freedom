@@ -49,6 +49,29 @@ export async function setSavingsTarget(_prev: ActionState, formData: FormData): 
   return {};
 }
 
+/** "80" or "12.5" (a percent, one decimal) to whole thousandths of a budget (0.8 = 800); null if malformed or not in (0, 200]. */
+function percentToThousandths(text: string): number | null {
+  const m = /^(\d{1,3})(?:\.(\d))?$/.exec(text);
+  if (!m) return null;
+  const thousandths = Number(m[1] + (m[2] ?? "0")); // percent x 10 = fraction x 1,000
+  return thousandths === 0 || thousandths > 2000 ? null : thousandths;
+}
+
+const thresholdText = (t: number) => `${Math.trunc(t / 1000)}.${String(t % 1000).padStart(3, "0")}`;
+
+/** B4: the shares of a budget spent at which it warns and alerts (defaults 80 and 100). Warn is at most alert. */
+export async function setBudgetThresholds(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  const userId = await requireUserId();
+  const warn = percentToThousandths(str(formData, "warn"));
+  const alert = percentToThousandths(str(formData, "alert"));
+  if (warn === null || alert === null || warn > alert) {
+    return { error: "Enter the warning and alert levels as percents of a budget, like 80 and 100: above 0, up to 200, with the warning no higher than the alert." };
+  }
+
+  await upsert(userId, { budgetWarnAt: thresholdText(warn), budgetAlertAt: thresholdText(alert) });
+  return {};
+}
+
 /** Rule H: the figures used until 3 full financial months of history exist. Blank clears one. */
 export async function setExpectedMonthly(_prev: ActionState, formData: FormData): Promise<ActionState> {
   const userId = await requireUserId();
