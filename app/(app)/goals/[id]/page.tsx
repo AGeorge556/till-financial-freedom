@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { Amount } from "@/components/Amount";
 import { formatDay, formatMonthYear } from "@/components/dates";
-import { GoalBadges, GoalFigures, GoalProgressBar, GoalStatusLine } from "@/components/GoalCard";
+import { GoalBadges, GoalFigures, GoalProgressBar, GoalStatusLine, GoalTargetNote } from "@/components/GoalCard";
 import { formatRate, sharePercentText } from "@/components/GoalFormat";
 import { AllocationForm, ArchiveGoalButton, EditGoalButton, HoldingShareForm } from "@/components/GoalForms";
 import { KIND_LABEL } from "@/components/HoldingFormat";
@@ -89,6 +89,7 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
         </div>
         <GoalStatusLine view={view} />
         <GoalFigures view={view} />
+        <GoalTargetNote view={view} />
         <p className="mt-3 text-sm text-muted">
           {returnLine}.{" "}
           {view.returnsMissing.length > 0 &&
@@ -230,7 +231,9 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
           goal={{
             id: goal.id,
             name: goal.name,
-            targetAmount: goal.targetAmount,
+            targetAmount: view.target.stored,
+            targetMode: view.target.mode,
+            targetMonths: view.target.mode === "expense_months" ? view.target.months : null,
             targetDate: goal.targetDate,
             startDate: goal.startDate,
             priority: goal.priority,

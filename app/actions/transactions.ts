@@ -131,8 +131,20 @@ export async function editTransaction(_prev: ActionState, formData: FormData): P
     const refError = await checkRefs(tx, userId, fields);
     if (refError) return refError;
 
-    await tx.update(transactions).set({ status: "void", voidedAt: new Date() }).where(eq(transactions.id, old.id));
-    await tx.insert(transactions).values({ userId, ...fields, status: old.status, replacesId: old.id });
+    // A row generated from a recurring template hands its (template, due date) to the replacement: the unique index
+    // holds one row per occurrence, so the replacement stays "fixed" for budgets and the occurrence is never regenerated.
+    await tx
+      .update(transactions)
+      .set({ status: "void", voidedAt: new Date(), recurringTemplateId: null, recurringDueDate: null })
+      .where(eq(transactions.id, old.id));
+    await tx.insert(transactions).values({
+      userId,
+      ...fields,
+      status: old.status,
+      replacesId: old.id,
+      recurringTemplateId: old.recurringTemplateId,
+      recurringDueDate: old.recurringDueDate,
+    });
   });
   if (error) return { error };
   revalidatePath("/", "layout");
@@ -153,6 +165,8 @@ export async function voidTransaction(_prev: ActionState, formData: FormData): P
   if (row?.holdingId) return voidInvestmentTransaction(_prev, formData);
   if (row?.liabilityId) return voidPayment(_prev, formData);
 
+  // A recurring row keeps its (template, due date) when voided, so voiding it (or skipping a pending one) is final:
+  // it is never generated again. Enter a corrected one by hand if it should count.
   const voided = await db
     .update(transactions)
     .set({ status: "void", voidedAt: new Date() })

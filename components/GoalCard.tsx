@@ -73,12 +73,49 @@ export function GoalBadges({ view }: { view: GoalView }) {
   return (
     <>
       {view.currentSource === "manual" && <span className={`${pill} text-muted`}>manual</span>}
+      {view.target.mode === "expense_months" && (
+        <span className={`${pill} text-muted`}>{monthsText(view.target.months)} of essentials</span>
+      )}
       {view.overAllocatedBy > 0 && (
         <span className={`${pill} text-negative`}>
           over-allocated by <Amount value={view.overAllocatedBy} />
         </span>
       )}
     </>
+  );
+}
+
+/** How an "expense_months" goal's target was worked out, and from how many months of history. Nothing for a fixed target. */
+export function GoalTargetNote({ view }: { view: GoalView }) {
+  const t = view.target;
+  if (t.mode !== "expense_months") return null;
+  if (t.calc.kind === "target") {
+    const used = t.calc.monthsUsed;
+    return (
+      <p className="mt-3 text-sm text-muted">
+        Target = {monthsText(t.months)} of essential spending. Your essential spending averages{" "}
+        <Amount value={t.calc.monthlyEssential} /> a month over your last {monthsText(used)} of history
+        {used < 6 ? " (up to 6 full months are used, so it firms up as months pass)" : ""}. It is recalculated each time you open
+        this page.
+      </p>
+    );
+  }
+  return (
+    <p role="status" className="mt-3 text-sm text-negative">
+      {t.calc.reason === "no-history"
+        ? "There is not yet one full month of history to work out this target."
+        : "Your essential categories show no spending in the last full months, so the target cannot be worked out."}{" "}
+      For now the target is your fixed amount of <Amount value={t.stored} />.{" "}
+      {t.calc.reason === "no-essential-spending" && (
+        <>
+          Mark your needs as essential in{" "}
+          <Link href="/more/categories" className="underline">
+            Categories
+          </Link>
+          .
+        </>
+      )}
+    </p>
   );
 }
 

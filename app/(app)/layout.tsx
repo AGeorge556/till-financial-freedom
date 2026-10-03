@@ -4,9 +4,11 @@ import { TabBar } from "@/components/TabBar";
 import { listAccounts, listCategories, listHoldings } from "@/db/queries";
 import { requireUserId } from "@/lib/auth";
 import { cairoToday } from "@/lib/finance-core/time";
+import { syncRecurring } from "./more/recurring/sync";
 
 export default async function AppLayout({ children }: LayoutProps<"/">) {
   const userId = await requireUserId();
+  await syncRecurring(userId);
   const [accounts, categories, holdings] = await Promise.all([
     listAccounts(userId),
     listCategories(userId),

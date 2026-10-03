@@ -3,8 +3,10 @@
 import { and, count, eq, isNotNull, isNull } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { db } from "@/db";
-import { goalAllocations, goals } from "@/db/schema";
+import { essentialMonthlyTotals, getSettings } from "@/db/queries";
+import { goalAllocations, goals, goalTargetMode } from "@/db/schema";
 import { requireUserId } from "@/lib/auth";
+import { emergencyTarget } from "@/lib/finance-core/goals";
 import { parseEGP, type Piasters } from "@/lib/finance-core/money";
 import { cairoToday } from "@/lib/finance-core/time";
 import { type ActionState, id, isRealDate, NAME_ERROR, str, validName } from "./shared";
@@ -13,11 +15,14 @@ const NOT_FOUND = "Goal not found.";
 const AMOUNT_ERROR = "Enter an amount like 1,250.50 (up to 2 decimals, no minus sign).";
 const RETURN_ERROR = "Enter the expected return as a percent between -100 and 1000, like 12 or 7.5.";
 const MAX_PRIORITY = 1000;
+const MAX_TARGET_MONTHS = 60;
 
-type Fields = Pick<
+type Mode = (typeof goalTargetMode.enumValues)[number];
+
+// targetAmount is null only for an expense_months goal with no fallback typed; withTarget fills it in.
+type ParsedFields = Pick<
   typeof goals.$inferInsert,
   | "name"
-  | "targetAmount"
   | "targetDate"
   | "startDate"
   | "priority"
@@ -26,7 +31,8 @@ type Fields = Pick<
   | "notes"
   | "color"
   | "icon"
-> & { manualCurrent: Piasters | null };
+> & { manualCurrent: Piasters | null; targetAmount: Piasters | null; targetMode: Mode; targetMonths: number | null };
+type Fields = ParsedFields & { targetAmount: Piasters };
 
 /** "12" or "-7.5" (a percent, up to 4 decimals) to the stored rate string "0.120000"; null if malformed or outside min..max percent. */
 function percentToRate(text: string, min: number, max: number): string | null {
@@ -44,12 +50,23 @@ function optionalEGP(text: string): Piasters | null | string {
 }
 
 /** Shape and format checks only; ownership is checked against the database. */
-function parseFields(formData: FormData, startFallback: string | undefined): Fields | string {
+function parseFields(formData: FormData, startFallback: string | undefined): ParsedFields | string {
   const name = str(formData, "name");
   if (!validName(name)) return NAME_ERROR;
 
-  const targetAmount = parseEGP(str(formData, "targetAmount"));
-  if (targetAmount === null || targetAmount === 0) return "Enter a target amount greater than zero, like 50,000.";
+  const targetMode = (str(formData, "targetMode") || "manual") as Mode;
+  if (!goalTargetMode.enumValues.includes(targetMode)) return "Choose a fixed target or a number of months of essential spending.";
+  let targetMonths: number | null = null;
+  if (targetMode === "expense_months") {
+    const monthsText = str(formData, "targetMonths");
+    targetMonths = /^\d{1,2}$/.test(monthsText) ? Number(monthsText) : 0;
+    if (targetMonths < 1 || targetMonths > MAX_TARGET_MONTHS) return `Enter the months of essential spending to cover, from 1 to ${MAX_TARGET_MONTHS}.`;
+  }
+  // An expense_months goal may leave the amount blank: it is then the target as it works out today (see withTarget).
+  const targetText = str(formData, "targetAmount");
+  const blankTarget = targetMode === "expense_months" && targetText === "";
+  const targetAmount = blankTarget ? null : parseEGP(targetText);
+  if (!blankTarget && (targetAmount === null || targetAmount === 0)) return "Enter a target amount greater than zero, like 50,000.";
 
   const targetDate = str(formData, "targetDate");
   const startDate = str(formData, "startDate") || startFallback;
@@ -79,6 +96,8 @@ function parseFields(formData: FormData, startFallback: string | undefined): Fie
   return {
     name,
     targetAmount,
+    targetMode,
+    targetMonths,
     targetDate,
     startDate,
     priority,
@@ -91,9 +110,26 @@ function parseFields(formData: FormData, startFallback: string | undefined): Fie
   };
 }
 
+/**
+ * goals.target_amount cannot be empty, so an expense_months goal saved without a fallback stores the target as it works
+ * out now, which needs at least one full month of history. The target shown later is recalculated, not this figure.
+ */
+async function withTarget(userId: string, fields: ParsedFields): Promise<Fields | string> {
+  if (fields.targetAmount !== null) return { ...fields, targetAmount: fields.targetAmount };
+  const { monthStartDay } = await getSettings(userId);
+  const result = emergencyTarget({
+    months: fields.targetMonths!,
+    essentialMonthlyTotals: await essentialMonthlyTotals(userId, cairoToday(), monthStartDay),
+  });
+  if (result.kind === "target" && result.target > 0) return { ...fields, targetAmount: result.target };
+  return "There is not enough essential spending history to work out this target yet. Enter a target amount to use until there is.";
+}
+
 export async function createGoal(_prev: ActionState, formData: FormData): Promise<ActionState> {
   const userId = await requireUserId();
-  const fields = parseFields(formData, cairoToday());
+  const parsed = parseFields(formData, cairoToday());
+  if (typeof parsed === "string") return { error: parsed };
+  const fields = await withTarget(userId, parsed);
   if (typeof fields === "string") return { error: fields };
 
   await db.insert(goals).values({ ...fields, userId });
@@ -105,7 +141,9 @@ export async function updateGoal(_prev: ActionState, formData: FormData): Promis
   const userId = await requireUserId();
   const goalId = id(formData, "id");
   if (!goalId) return { error: NOT_FOUND };
-  const fields = parseFields(formData, undefined);
+  const parsed = parseFields(formData, undefined);
+  if (typeof parsed === "string") return { error: parsed };
+  const fields = await withTarget(userId, parsed);
   if (typeof fields === "string") return { error: fields };
 
   const error = await db.transaction(async (tx) => {

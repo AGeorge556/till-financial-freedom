@@ -14,7 +14,10 @@ import { Field, field, primaryBtn, secondaryBtn } from "./ui";
 export type GoalFormValues = {
   id: string;
   name: string;
+  /** The stored amount: the fixed target, or for "expense_months" the fallback. */
   targetAmount: number;
+  targetMode: "manual" | "expense_months";
+  targetMonths: number | null;
   targetDate: string;
   startDate: string;
   priority: number;
@@ -27,6 +30,7 @@ export type GoalFormValues = {
 };
 
 function GoalFields({ initial, priority, allowManual }: { initial?: GoalFormValues; priority: number; allowManual: boolean }) {
+  const [mode, setMode] = useState<"manual" | "expense_months">(initial?.targetMode ?? "manual");
   return (
     <>
       {initial && (
@@ -48,17 +52,66 @@ function GoalFields({ initial, priority, allowManual }: { initial?: GoalFormValu
           className={field}
         />
       </Field>
-      <Field label="Target amount (EGP)" className="mt-4">
+      <fieldset className="mt-4">
+        <legend className="text-sm text-muted">How the target is set</legend>
+        <div className="mt-2 grid grid-cols-2 gap-2">
+          {(
+            [
+              ["manual", "A fixed amount"],
+              ["expense_months", "Months of essential expenses"],
+            ] as const
+          ).map(([value, text]) => (
+            <label key={value}>
+              <input
+                type="radio"
+                name="targetMode"
+                value={value}
+                checked={mode === value}
+                onChange={() => setMode(value)}
+                className="peer sr-only"
+              />
+              <span className="flex min-h-11 items-center justify-center rounded-xl border border-border px-2 text-center text-sm peer-checked:border-foreground peer-checked:bg-foreground peer-checked:text-background peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-foreground">
+                {text}
+              </span>
+            </label>
+          ))}
+        </div>
+      </fieldset>
+      {mode === "expense_months" && (
+        <>
+          <Field label="How many months of essential expenses" className="mt-4">
+            <input
+              name="targetMonths"
+              inputMode="numeric"
+              autoComplete="off"
+              required
+              placeholder="6"
+              defaultValue={initial?.targetMonths ?? undefined}
+              className={field}
+            />
+          </Field>
+          <p className="mt-1 text-sm text-muted">
+            The target is this many months times your average essential spending over the last 6 full months, recalculated
+            automatically. Mark your needs as essential in More &gt; Categories.
+          </p>
+        </>
+      )}
+      <Field label={mode === "manual" ? "Target amount (EGP)" : "Fallback target (EGP, optional)"} className="mt-4">
         <input
           name="targetAmount"
           inputMode="decimal"
           autoComplete="off"
-          required
+          required={mode === "manual"}
           placeholder="50,000"
           defaultValue={initial ? egpText(initial.targetAmount) : undefined}
           className={field}
         />
       </Field>
+      {mode === "expense_months" && (
+        <p className="mt-1 text-sm text-muted">
+          Used only while there is no full month of history. Left blank, it starts from today&apos;s calculated target.
+        </p>
+      )}
       <Field label="Target date" className="mt-4">
         <input name="targetDate" type="date" required defaultValue={initial?.targetDate} className={field} />
       </Field>

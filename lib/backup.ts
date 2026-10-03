@@ -1,6 +1,7 @@
 import type { RuleKind, SavingsTargetMode, TargetKind } from "./finance-core/allocation";
 import { type CashFlow, type Confirmation, DEFAULT_STALE_DAYS_CLOUDS, type RateChange, validateCloudHistory } from "./finance-core/clouds";
 import { DEFAULT_STALE_DAYS_GOLD, type GoldPriceMode, KARATS } from "./finance-core/gold";
+import { DEFAULT_BUDGET_ALERT_AT, DEFAULT_BUDGET_WARN_AT } from "./finance-core/budget";
 import { lineValue } from "./finance-core/holdings";
 import type { TxType } from "./finance-core/ledger";
 import { outstanding, validatePayment } from "./finance-core/liabilities";
@@ -9,9 +10,10 @@ import { DEFAULT_STALE_DAYS, type HoldingEvent, purchaseCash, saleCash, validate
 
 // Pure: no React, Next.js or database imports. The enum lists below mirror db/schema.ts (backup.test.ts checks they match).
 
-export const BACKUP_VERSION = 4;
-// Version 1 files (no goals, rules or savings settings), version 2 files (no holdings) and version 3 files
-// (no gold, clouds, liabilities or holding shares) still restore.
+export const BACKUP_VERSION = 5;
+// Version 1 files (no goals, rules or savings settings), version 2 files (no holdings), version 3 files
+// (no gold, clouds, liabilities or holding shares) and version 4 files (no budgets, recurring items or expense-based goal
+// targets) still restore.
 const OLDEST_VERSION = 1;
 
 export const ACCOUNT_TYPES = ["bank", "cash", "wallet", "brokerage", "savings", "credit_card", "receivable", "other"] as const;
@@ -37,6 +39,9 @@ export const CORPORATE_ACTION_KINDS = ["BONUS", "SPLIT", "WRITE_OFF"] as const;
 export const SAVINGS_MODES = ["fixed", "percentage", "flexible"] as const satisfies readonly SavingsTargetMode[];
 export const RULE_KINDS = ["fixed", "percentage", "remainder"] as const satisfies readonly RuleKind[];
 export const TARGET_KINDS = ["goal", "investments", "cash"] as const satisfies readonly TargetKind[];
+export const RECURRING_FREQUENCIES = ["weekly", "monthly", "yearly"] as const;
+export const RECURRING_TYPES = ["INCOME", "EXPENSE"] as const satisfies readonly TxType[];
+export const GOAL_TARGET_MODES = ["manual", "expense_months"] as const;
 
 // Postgres limits behind the checks below: integer columns hold up to 2^31-1, numeric(8,6) rates stay under 100.
 const INT4_MAX = 2_147_483_647;
@@ -50,6 +55,8 @@ type GoldForm = (typeof GOLD_FORMS)[number];
 type ContributionFrequency = (typeof CONTRIBUTION_FREQUENCIES)[number];
 type LiabilityKind = (typeof LIABILITY_KINDS)[number];
 type CorporateActionKind = (typeof CORPORATE_ACTION_KINDS)[number];
+type RecurringFrequency = (typeof RECURRING_FREQUENCIES)[number];
+type GoalTargetMode = (typeof GOAL_TARGET_MODES)[number];
 
 // Timestamps are ISO-8601 UTC strings; user_id is deliberately absent (restore stamps the current user).
 export type BackupAccount = {
@@ -95,8 +102,37 @@ export type BackupTransaction = {
   /** Only on a LIABILITY_PAYMENT (principal) or the EXPENSE (interest) written with it. */
   liabilityId: string | null;
   replacesId: string | null;
+  /** Both set (a row generated from a recurring template, for that due date) or both null. */
+  recurringTemplateId: string | null;
+  recurringDueDate: string | null;
   voidedAt: string | null;
   createdAt: string;
+};
+
+export type BackupBudget = {
+  id: string;
+  /** Null = the overall monthly budget. */
+  categoryId: string | null;
+  amount: Piasters;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type BackupRecurringTemplate = {
+  id: string;
+  name: string;
+  type: (typeof RECURRING_TYPES)[number];
+  amount: Piasters;
+  categoryId: string | null;
+  accountId: string;
+  frequency: RecurringFrequency;
+  startDate: string;
+  endDate: string | null;
+  autoPost: boolean;
+  active: boolean;
+  note: string | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type BackupHolding = {
@@ -210,12 +246,18 @@ export type BackupSettings = {
   goldPriceMode: GoldPriceMode;
   staleDaysGold: number;
   staleDaysClouds: number;
+  /** Decimals: 0.8 = a budget warns at 80% spent, alerts at 1 = 100%. */
+  budgetWarnAt: number;
+  budgetAlertAt: number;
 };
 
 export type BackupGoal = {
   id: string;
   name: string;
   targetAmount: Piasters;
+  /** expense_months: the target is targetMonths x average monthly essential spending; targetAmount is the fallback. */
+  targetMode: GoalTargetMode;
+  targetMonths: number | null;
   targetDate: string;
   startDate: string;
   priority: number;
@@ -296,6 +338,8 @@ export type Backup = {
   cloudConfirmations: BackupCloudConfirmation[];
   liabilities: BackupLiability[];
   liabilityUpdates: BackupLiabilityUpdate[];
+  budgets: BackupBudget[];
+  recurringTemplates: BackupRecurringTemplate[];
   assumptions: BackupAssumptions;
 };
 
@@ -305,12 +349,15 @@ type Rated<T, K extends keyof T> = Omit<T, K> & { [P in K]: number | string | nu
 type AccountRow = Dated<BackupAccount, "archivedAt" | "createdAt" | "updatedAt">;
 type CategoryRow = Dated<BackupCategory, "archivedAt" | "createdAt">;
 type TransactionRow = Dated<BackupTransaction, "voidedAt" | "createdAt">;
-type SettingsRow = Rated<BackupSettings, "savingsTargetPercent">;
+type SettingsRow = Rated<BackupSettings, "savingsTargetPercent" | "budgetWarnAt" | "budgetAlertAt">;
 type GoalRow = Rated<Dated<BackupGoal, "archivedAt" | "createdAt" | "updatedAt">, "expectedReturnOverride">;
 type GoalAllocationRow = Rated<Dated<BackupGoalAllocation, "createdAt" | "updatedAt">, "percent">;
 type GoalAllocationEventRow = Rated<Dated<BackupGoalAllocationEvent, "createdAt">, "percentDelta">;
 type AllocationRuleRow = Rated<Dated<BackupAllocationRule, "createdAt">, "percent">;
 type AllocationOverrideRow = Dated<BackupAllocationOverride, "createdAt">;
+type BudgetRow = Dated<BackupBudget, "createdAt" | "updatedAt">;
+// The column is the whole transaction_type enum; a CHECK limits it to INCOME and EXPENSE.
+type RecurringTemplateRow = Dated<Omit<BackupRecurringTemplate, "type"> & { type: TxType }, "createdAt" | "updatedAt">;
 type HoldingRow = Dated<BackupHolding, "archivedAt" | "createdAt" | "updatedAt">;
 type GoldPriceRow = Dated<BackupGoldPrice, "createdAt">;
 type RateChangeRow = Rated<Dated<BackupRateChange, "createdAt">, "apy">;
@@ -325,30 +372,32 @@ const iso = (d: Date) => d.toISOString();
 const isoOrNull = (d: Date | null) => (d ? d.toISOString() : null);
 const numOrNull = (v: number | string | null) => (v === null ? null : Number(v));
 
+/** What serializeBackup takes: one list per table. The export route's loader must return all of it. */
+export type BackupRows = {
+  settings: SettingsRow;
+  accounts: AccountRow[];
+  categories: CategoryRow[];
+  transactions: TransactionRow[];
+  goals: GoalRow[];
+  goalAllocations: GoalAllocationRow[];
+  goalAllocationEvents: GoalAllocationEventRow[];
+  allocationRules: AllocationRuleRow[];
+  allocationOverrides: AllocationOverrideRow[];
+  holdings: HoldingRow[];
+  priceUpdates: PriceUpdateRow[];
+  corporateActions: CorporateActionRow[];
+  goldPrices: GoldPriceRow[];
+  rateHistory: RateChangeRow[];
+  cloudConfirmations: CloudConfirmationRow[];
+  liabilities: LiabilityRow[];
+  liabilityUpdates: LiabilityUpdateRow[];
+  budgets: BudgetRow[];
+  recurringTemplates: RecurringTemplateRow[];
+  assumptions: AssumptionsRow;
+};
+
 /** Database rows (Date timestamps, with user_id) to the backup shape. Fields are copied by name, so user_id never leaks in. */
-export function serializeBackup(
-  rows: {
-    settings: SettingsRow;
-    accounts: AccountRow[];
-    categories: CategoryRow[];
-    transactions: TransactionRow[];
-    goals: GoalRow[];
-    goalAllocations: GoalAllocationRow[];
-    goalAllocationEvents: GoalAllocationEventRow[];
-    allocationRules: AllocationRuleRow[];
-    allocationOverrides: AllocationOverrideRow[];
-    holdings: HoldingRow[];
-    priceUpdates: PriceUpdateRow[];
-    corporateActions: CorporateActionRow[];
-    goldPrices: GoldPriceRow[];
-    rateHistory: RateChangeRow[];
-    cloudConfirmations: CloudConfirmationRow[];
-    liabilities: LiabilityRow[];
-    liabilityUpdates: LiabilityUpdateRow[];
-    assumptions: AssumptionsRow;
-  },
-  exportedAt: Date = new Date(),
-): Backup {
+export function serializeBackup(rows: BackupRows, exportedAt: Date = new Date()): Backup {
   return {
     version: BACKUP_VERSION,
     exportedAt: iso(exportedAt),
@@ -363,6 +412,8 @@ export function serializeBackup(
       goldPriceMode: rows.settings.goldPriceMode,
       staleDaysGold: rows.settings.staleDaysGold,
       staleDaysClouds: rows.settings.staleDaysClouds,
+      budgetWarnAt: Number(rows.settings.budgetWarnAt),
+      budgetAlertAt: Number(rows.settings.budgetAlertAt),
     },
     accounts: rows.accounts.map((a) => ({
       id: a.id,
@@ -403,6 +454,8 @@ export function serializeBackup(
       unitPrice: t.unitPrice,
       liabilityId: t.liabilityId,
       replacesId: t.replacesId,
+      recurringTemplateId: t.recurringTemplateId,
+      recurringDueDate: t.recurringDueDate,
       voidedAt: isoOrNull(t.voidedAt),
       createdAt: iso(t.createdAt),
     })),
@@ -410,6 +463,8 @@ export function serializeBackup(
       id: g.id,
       name: g.name,
       targetAmount: g.targetAmount,
+      targetMode: g.targetMode,
+      targetMonths: g.targetMonths,
       targetDate: g.targetDate,
       startDate: g.startDate,
       priority: g.priority,
@@ -534,6 +589,29 @@ export function serializeBackup(
       delta: u.delta,
       note: u.note,
       createdAt: iso(u.createdAt),
+    })),
+    budgets: rows.budgets.map((b) => ({
+      id: b.id,
+      categoryId: b.categoryId,
+      amount: b.amount,
+      createdAt: iso(b.createdAt),
+      updatedAt: iso(b.updatedAt),
+    })),
+    recurringTemplates: rows.recurringTemplates.map((t) => ({
+      id: t.id,
+      name: t.name,
+      type: t.type as BackupRecurringTemplate["type"],
+      amount: t.amount,
+      categoryId: t.categoryId,
+      accountId: t.accountId,
+      frequency: t.frequency,
+      startDate: t.startDate,
+      endDate: t.endDate,
+      autoPost: t.autoPost,
+      active: t.active,
+      note: t.note,
+      createdAt: iso(t.createdAt),
+      updatedAt: iso(t.updatedAt),
     })),
     assumptions: {
       stockReturn: numOrNull(rows.assumptions.stockReturn),
@@ -704,6 +782,13 @@ function share(o: Obj, k: string, w: string): number {
 
 const micro = (v: number) => Math.round(v * 1_000_000);
 
+/** A decimal that fits numeric(4,3) exactly (user_settings.budget_*_at). */
+function thousandths(o: Obj, k: string, w: string): number {
+  const v = rate(o, k, w);
+  if (Math.abs(v * 1000 - Math.round(v * 1000)) > 1e-6) bad(`${w}.${k}`, "must have at most 3 decimals");
+  return v;
+}
+
 const textOrNull = orNull(text);
 const decimalOrNull = orNull(decimal);
 const wholeOrNull = orNull((o: Obj, k: string, w: string) => whole(o, k, w));
@@ -711,8 +796,7 @@ const rateOrNull = orNull(rate);
 const shareOrNull = orNull(share);
 const dayOrNull = orNull(day);
 const formOrNull = orNull((o: Obj, k: string, w: string) => oneOf(o, k, w, GOLD_FORMS));
-const frequencyOrNull = orNull((o: Obj, k: string, w: string) => oneOf(o, k, w, CONTRIBUTION_FREQUENCIES));
-const uuidOrNull = orNull(uuid);
+const frequencyOrNull = orNull((o: Obj, k: string, w: string) => oneOf(o, k, w, CONTRIBUTION_FREQUENCIES));const uuidOrNull = orNull(uuid);
 const stampOrNull = orNull(stamp);
 
 function unique(values: string[], where: string): void {
@@ -750,10 +834,16 @@ function parseTransaction(raw: unknown, i: number, version: number): BackupTrans
     unitPrice: version < 3 ? null : decimalOrNull(o, "unitPrice", w),
     liabilityId: version < 4 ? null : uuidOrNull(o, "liabilityId", w),
     replacesId: uuidOrNull(o, "replacesId", w),
+    recurringTemplateId: version < 5 ? null : uuidOrNull(o, "recurringTemplateId", w),
+    recurringDueDate: version < 5 ? null : dayOrNull(o, "recurringDueDate", w),
     voidedAt: stampOrNull(o, "voidedAt", w),
     createdAt: stamp(o, "createdAt", w),
   };
 
+  // Same rule as transactions_recurring_check in db/schema.ts.
+  if ((t.recurringTemplateId === null) !== (t.recurringDueDate === null)) {
+    bad(w, "recurringTemplateId and recurringDueDate are set together or not at all");
+  }
   if (t.amount === 0 || (t.type !== "ADJUSTMENT" && t.amount < 0)) {
     bad(`${w}.amount`, "must be positive (only ADJUSTMENT may be negative) and never zero");
   }
@@ -836,10 +926,18 @@ function parseSettings(raw: unknown, version: number): BackupSettings {
       goldPriceMode: "derive_24k",
       staleDaysGold: DEFAULT_STALE_DAYS_GOLD,
       staleDaysClouds: DEFAULT_STALE_DAYS_CLOUDS,
+      budgetWarnAt: DEFAULT_BUDGET_WARN_AT,
+      budgetAlertAt: DEFAULT_BUDGET_ALERT_AT,
     };
   }
   // Same rule as user_settings_stale_days_holdings_range in db/schema.ts.
   const staleDaysHoldings = version < 3 ? DEFAULT_STALE_DAYS : staleDaysField(o, "staleDaysHoldings");
+  const budgetWarnAt = version < 5 ? DEFAULT_BUDGET_WARN_AT : thousandths(o, "budgetWarnAt", "settings");
+  const budgetAlertAt = version < 5 ? DEFAULT_BUDGET_ALERT_AT : thousandths(o, "budgetAlertAt", "settings");
+  // Same rule as user_settings_budget_thresholds_check in db/schema.ts.
+  if (!(budgetWarnAt > 0 && budgetWarnAt <= budgetAlertAt && budgetAlertAt <= 2)) {
+    bad("settings", "budgetWarnAt must be above 0, no higher than budgetAlertAt, which must be 2 (200%) or less");
+  }
   return {
     monthStartDay,
     savingsTargetMode: oneOf(o, "savingsTargetMode", "settings", SAVINGS_MODES),
@@ -851,6 +949,8 @@ function parseSettings(raw: unknown, version: number): BackupSettings {
     goldPriceMode: version < 4 ? "derive_24k" : oneOf(o, "goldPriceMode", "settings", GOLD_PRICE_MODES),
     staleDaysGold: version < 4 ? DEFAULT_STALE_DAYS_GOLD : staleDaysField(o, "staleDaysGold"),
     staleDaysClouds: version < 4 ? DEFAULT_STALE_DAYS_CLOUDS : staleDaysField(o, "staleDaysClouds"),
+    budgetWarnAt,
+    budgetAlertAt,
   };
 }
 
@@ -1030,13 +1130,15 @@ function parseCorporateAction(raw: unknown, i: number): BackupCorporateAction {
 }
 
 // Same rules as the goals_*_check constraints in db/schema.ts.
-function parseGoal(raw: unknown, i: number): BackupGoal {
+function parseGoal(raw: unknown, i: number, version: number): BackupGoal {
   const w = `goals[${i}]`;
   const o = entry(raw, w);
   const g: BackupGoal = {
     id: uuid(o, "id", w),
     name: name(o, "name", w),
     targetAmount: whole(o, "targetAmount", w),
+    targetMode: version < 5 ? "manual" : oneOf(o, "targetMode", w, GOAL_TARGET_MODES),
+    targetMonths: version < 5 ? null : wholeOrNull(o, "targetMonths", w),
     targetDate: day(o, "targetDate", w),
     startDate: day(o, "startDate", w),
     priority: whole(o, "priority", w, "a whole number of 1 or more"),
@@ -1051,6 +1153,11 @@ function parseGoal(raw: unknown, i: number): BackupGoal {
     updatedAt: stamp(o, "updatedAt", w),
   };
   if (g.targetAmount <= 0) bad(`${w}.targetAmount`, "must be above zero");
+  // Same rule as goals_target_mode_check.
+  if ((g.targetMode === "expense_months") !== (g.targetMonths !== null)) {
+    bad(w, "targetMonths is set exactly when targetMode is expense_months");
+  }
+  if (g.targetMonths !== null && (g.targetMonths < 1 || g.targetMonths > 60)) bad(`${w}.targetMonths`, "must be a whole number from 1 to 60");
   if (g.priority < 1 || g.priority > INT4_MAX) bad(`${w}.priority`, `must be a whole number from 1 to ${INT4_MAX}`);
   if (g.plannedMonthly !== null && g.plannedMonthly < 0) bad(`${w}.plannedMonthly`, "must not be negative");
   if (g.manualCurrent !== null && g.manualCurrent < 0) bad(`${w}.manualCurrent`, "must not be negative");
@@ -1151,6 +1258,46 @@ function parseAllocationOverride(raw: unknown, i: number): BackupAllocationOverr
   return v;
 }
 
+// budgets_amount_check.
+function parseBudget(raw: unknown, i: number): BackupBudget {
+  const w = `budgets[${i}]`;
+  const o = entry(raw, w);
+  const b: BackupBudget = {
+    id: uuid(o, "id", w),
+    categoryId: uuidOrNull(o, "categoryId", w),
+    amount: whole(o, "amount", w),
+    createdAt: stamp(o, "createdAt", w),
+    updatedAt: stamp(o, "updatedAt", w),
+  };
+  if (b.amount <= 0) bad(`${w}.amount`, "must be above zero");
+  return b;
+}
+
+// Same rules as the recurring_templates_*_check constraints in db/schema.ts.
+function parseRecurringTemplate(raw: unknown, i: number): BackupRecurringTemplate {
+  const w = `recurringTemplates[${i}]`;
+  const o = entry(raw, w);
+  const t: BackupRecurringTemplate = {
+    id: uuid(o, "id", w),
+    name: name(o, "name", w),
+    type: oneOf(o, "type", w, RECURRING_TYPES),
+    amount: whole(o, "amount", w),
+    categoryId: uuidOrNull(o, "categoryId", w),
+    accountId: uuid(o, "accountId", w),
+    frequency: oneOf(o, "frequency", w, RECURRING_FREQUENCIES),
+    startDate: day(o, "startDate", w),
+    endDate: dayOrNull(o, "endDate", w),
+    autoPost: flag(o, "autoPost", w),
+    active: flag(o, "active", w),
+    note: textOrNull(o, "note", w),
+    createdAt: stamp(o, "createdAt", w),
+    updatedAt: stamp(o, "updatedAt", w),
+  };
+  if (t.amount <= 0) bad(`${w}.amount`, "must be above zero");
+  if (t.endDate !== null && t.endDate < t.startDate) bad(`${w}.endDate`, "must not be before the start date");
+  return t;
+}
+
 /** A collection that older files do not have: empty before `since`, required (a list) from then on. */
 function listSince(root: Obj, key: string, version: number, since: number): unknown[] {
   return version < since ? [] : list(root, key);
@@ -1213,7 +1360,7 @@ function build(input: unknown): Backup {
   });
   if (!replaceDepths(transactions)) bad("transactions", "replacesId links form a loop");
 
-  const goals = listSince(input, "goals", version, 2).map(parseGoal);
+  const goals = listSince(input, "goals", version, 2).map((raw, i) => parseGoal(raw, i, version));
   const goalAllocations = listSince(input, "goalAllocations", version, 2).map((raw, i) => parseGoalAllocation(raw, i, version));
   const goalAllocationEvents = listSince(input, "goalAllocationEvents", version, 2).map((raw, i) =>
     parseGoalAllocationEvent(raw, i, version),
@@ -1259,6 +1406,8 @@ function build(input: unknown): Backup {
   const cloudConfirmations = listSince(input, "cloudConfirmations", version, 4).map(parseCloudConfirmation);
   const liabilities = listSince(input, "liabilities", version, 4).map(parseLiability);
   const liabilityUpdates = listSince(input, "liabilityUpdates", version, 4).map(parseLiabilityUpdate);
+  const budgets = listSince(input, "budgets", version, 5).map(parseBudget);
+  const recurringTemplates = listSince(input, "recurringTemplates", version, 5).map(parseRecurringTemplate);
   const assumptions = parseAssumptions(input.assumptions, version);
   unique(holdings.map((h) => h.id), "holdings.id");
   unique(priceUpdates.map((p) => p.id), "priceUpdates.id");
@@ -1268,12 +1417,35 @@ function build(input: unknown): Backup {
   unique(cloudConfirmations.map((c) => c.id), "cloudConfirmations.id");
   unique(liabilities.map((l) => l.id), "liabilities.id");
   unique(liabilityUpdates.map((u) => u.id), "liabilityUpdates.id");
+  unique(budgets.map((b) => b.id), "budgets.id");
+  // Same rules as budgets_user_category_idx and budgets_one_overall_idx.
+  unique(budgets.filter((b) => b.categoryId).map((b) => b.categoryId!), "budgets (category)");
+  if (budgets.filter((b) => b.categoryId === null).length > 1) bad("budgets", "at most one overall budget (no category) is allowed");
+  unique(recurringTemplates.map((t) => t.id), "recurringTemplates.id");
+  // Same rule as transactions_recurring_occurrence_idx: one row per template and due date, whatever its status.
+  unique(
+    transactions.filter((t) => t.recurringTemplateId).map((t) => `${t.recurringTemplateId} ${t.recurringDueDate}`),
+    "transactions (recurring template and due date)",
+  );
 
   const holdingIds = new Set(holdings.map((h) => h.id));
   const needHolding = (id: string | null, where: string) => {
     if (id && !holdingIds.has(id)) bad(where, "refers to a holding that is not in the file");
   };
   holdings.forEach((h, i) => needAccount(h.accountId, `holdings[${i}].accountId`));
+  const templateIds = new Set(recurringTemplates.map((t) => t.id));
+  recurringTemplates.forEach((t, i) => {
+    needAccount(t.accountId, `recurringTemplates[${i}].accountId`);
+    if (t.categoryId && !categoryIds.has(t.categoryId)) bad(`recurringTemplates[${i}].categoryId`, "refers to a category that is not in the file");
+  });
+  budgets.forEach((b, i) => {
+    if (b.categoryId && !categoryIds.has(b.categoryId)) bad(`budgets[${i}].categoryId`, "refers to a category that is not in the file");
+  });
+  transactions.forEach((t, i) => {
+    if (t.recurringTemplateId && !templateIds.has(t.recurringTemplateId)) {
+      bad(`transactions[${i}].recurringTemplateId`, "refers to a recurring template that is not in the file");
+    }
+  });
   transactions.forEach((t, i) => needHolding(t.holdingId, `transactions[${i}].holdingId`));
   priceUpdates.forEach((p, i) => needHolding(p.holdingId, `priceUpdates[${i}].holdingId`));
   corporateActions.forEach((c, i) => needHolding(c.holdingId, `corporateActions[${i}].holdingId`));
@@ -1315,7 +1487,8 @@ function build(input: unknown): Backup {
   const events = eventsByHolding(toHoldingEvents(transactions, corporateActions));
   holdings.forEach((h, i) => {
     const check = validateHistory(events.get(h.id) ?? []);
-    if (!check.ok) bad(`holdings[${i}]`, `impossible position: ${check.error} (on ${check.date})`);
+    // No quantities in the message (the engine's own text quotes them): error text is plain text, which privacy mode does not hide.
+    if (!check.ok) bad(`holdings[${i}]`, `the history leaves an impossible position (on ${check.date})`);
   });
 
   // The cash of a posted unit trade must be what quantity x unitPrice (+/- fee and tax) says it is. The generic
@@ -1335,7 +1508,7 @@ function build(input: unknown): Backup {
         if (t.grossAmount !== lineValue(t.quantity, t.unitPrice)) bad(`${w}.grossAmount`, "does not equal quantity x unitPrice");
       }
     } catch (e) {
-      if (e instanceof RangeError) bad(w, `cannot be priced: ${e.message}`);
+      if (e instanceof RangeError) bad(w, "cannot be priced");
       throw e;
     }
   });
@@ -1355,9 +1528,9 @@ function build(input: unknown): Backup {
       .map((c) => ({ date: c.date, createdAt: stampOf(c.createdAt), value: c.value }));
     try {
       const check = validateCloudHistory({ confirmations, cashFlows, rates });
-      if (!check.ok) bad(`holdings[${i}]`, `${check.error} (on ${check.date})`);
+      if (!check.ok) bad(`holdings[${i}]`, `a withdrawal is larger than the cloud's estimated value (on ${check.date})`);
     } catch (e) {
-      if (e instanceof RangeError) bad(`holdings[${i}]`, `cannot be valued: ${e.message}`);
+      if (e instanceof RangeError) bad(`holdings[${i}]`, "cannot be valued");
       throw e;
     }
   });
@@ -1366,6 +1539,11 @@ function build(input: unknown): Backup {
   // payments together stay within the opening balance plus every manual update.
   liabilities.forEach((l, i) => {
     const updates = liabilityUpdates.filter((u) => u.liabilityId === l.id);
+    // Same rule as addLiabilityUpdate: the opening balance plus every manual update stays at or above zero. Dates are
+    // not checked, so a history the app accepted always restores. No amounts in the message.
+    if (updates.reduce((total, u) => total + u.delta, l.openingBalance) < 0) {
+      bad(`liabilities[${i}]`, "the manual updates take the balance below zero");
+    }
     const paid: { date: string; amount: Piasters }[] = [];
     for (const t of transactions) {
       if (t.type !== "LIABILITY_PAYMENT" || t.status !== "posted" || t.liabilityId !== l.id) continue;
@@ -1405,6 +1583,8 @@ function build(input: unknown): Backup {
     cloudConfirmations,
     liabilities,
     liabilityUpdates,
+    budgets,
+    recurringTemplates,
     assumptions,
   };
 }

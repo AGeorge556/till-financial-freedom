@@ -4,7 +4,10 @@ import Link from "next/link";
 import { useState } from "react";
 import type { TxType } from "@/lib/finance-core/ledger";
 import { Amount } from "./Amount";
+import { voidTransaction } from "@/app/actions/transactions";
 import { formatWeekday } from "./dates";
+import { Form } from "./Form";
+import { PendingRecurringRow } from "./RecurringPending";
 import { Sheet } from "./Sheet";
 import { type AccountOption, type CategoryOption, type Kind, TransactionForm } from "./TransactionForm";
 
@@ -19,6 +22,10 @@ export type ListRow = {
   categoryId: string | null;
   fromAccountId: string | null;
   toAccountId: string | null;
+  /** Set on a loan payment's rows; its interest EXPENSE row is not edited like an ordinary expense. */
+  liabilityId: string | null;
+  /** Set on a row generated from a recurring item. */
+  recurringTemplateId: string | null;
   category: string | null;
   account: string;
 };
@@ -59,10 +66,16 @@ function tone(row: ListRow): { sign: string; cls: string; value: number } {
 const isInvestmentRow = (row: ListRow) =>
   row.type === "INVESTMENT_PURCHASE" || row.type === "INVESTMENT_SALE" || row.type === "DIVIDEND";
 
+const isLoanInterest = (row: ListRow) => row.type === "EXPENSE" && row.liabilityId !== null;
+
+const isPendingRecurring = (row: ListRow) => row.status === "pending" && row.recurringTemplateId !== null;
+
+/** Rows that open a sheet when tapped: the ordinary edit form, or for a loan's interest a void-only sheet. */
 const isEditable = (row: ListRow) =>
   row.status !== "void" && (row.type === "EXPENSE" || row.type === "INCOME" || row.type === "TRANSFER");
 
 function Row({ row, onOpen }: { row: ListRow; onOpen: (row: ListRow) => void }) {
+  if (isPendingRecurring(row)) return <PendingRecurringRow item={row} />;
   const { sign, cls, value } = tone(row);
   const voided = row.status === "void";
   const body = (
@@ -166,8 +179,41 @@ export function TransactionList({
         ))
       )}
 
-      <Sheet open={selected !== null} onClose={() => setSelected(null)} label="Edit transaction">
-        {selected && (
+      <Sheet open={selected !== null} onClose={() => setSelected(null)} label={selected && isLoanInterest(selected) ? "Loan interest" : "Edit transaction"}>
+        {selected && isLoanInterest(selected) && (
+          <>
+            <h2 className="mr-11 mb-3 text-lg font-semibold tracking-tight">Interest on a loan payment</h2>
+            <p className="text-muted">
+              This is the interest part of a loan payment, so it cannot be edited on its own. Voiding it also voids the
+              principal part of the same payment, and both stop counting. Both stay in your history. To correct it, void
+              it and enter the payment again from the loan.
+            </p>
+            <Form
+              action={voidTransaction}
+              onSuccess={() => setSelected(null)}
+              confirm="Void this interest and the principal part of the same loan payment? Both stay in your history but stop counting."
+            >
+              {({ pending }) => (
+                <>
+                  <input type="hidden" name="id" value={selected.id} />
+                  <button
+                    type="submit"
+                    disabled={pending}
+                    className="mt-5 min-h-11 w-full rounded-xl border border-border px-4 font-medium text-negative disabled:opacity-60"
+                  >
+                    {pending ? "Voiding…" : "Void the whole payment"}
+                  </button>
+                </>
+              )}
+            </Form>
+            {selected.liabilityId && (
+              <Link href={`/more/liabilities/${selected.liabilityId}`} className="mt-3 flex min-h-11 items-center justify-center text-sm underline">
+                Open the loan
+              </Link>
+            )}
+          </>
+        )}
+        {selected && !isLoanInterest(selected) && (
           <>
             <h2 className="mr-11 mb-5 text-lg font-semibold tracking-tight">Edit {TYPE_LABEL[selected.type].toLowerCase()}</h2>
             <TransactionForm
