@@ -27,3 +27,14 @@ export function formatEGP(amount: Piasters, options: { showPiasters?: boolean } 
   const isZero = options.showPiasters ? amount === 0 : Math.round(egp) === 0;
   return `${amount < 0 && !isZero ? "−" : ""}${digits} EGP`;
 }
+
+// Thousands commas must be well-formed ("1,250" yes, "1,25" no); 1-2 decimals.
+const EGP_INPUT = /^(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?$/;
+
+/** Parses what a person types ("1,250.5") into piasters. Digit-string math, no float multiplication. */
+export function parseEGP(text: string): Piasters | null {
+  const m = EGP_INPUT.exec(text.trim());
+  if (!m) return null;
+  const piasters = Number(m[1].replaceAll(",", "") + (m[2] ?? "").padEnd(2, "0"));
+  return Number.isSafeInteger(piasters) ? piasters : null;
+}

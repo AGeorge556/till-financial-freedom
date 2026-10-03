@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { egpToPiasters, formatEGP, roundPiasters } from "./money";
+import { egpToPiasters, formatEGP, parseEGP, roundPiasters } from "./money";
 
 describe("formatEGP", () => {
   it.each([
@@ -61,5 +61,42 @@ describe("egpToPiasters", () => {
     [-2000, -200000],
   ])("%d EGP -> %d piasters", (egp, expected) => {
     expect(egpToPiasters(egp)).toBe(expected);
+  });
+});
+
+describe("parseEGP", () => {
+  it.each([
+    ["250", 25000],
+    ["1,250.5", 125050],
+    ["0.05", 5],
+    ["0", 0],
+    ["19.99", 1999],
+    ["1,000,000", 100000000],
+    ["  250.00 ", 25000],
+    ["007", 700],
+    ["90071992547409.91", Number.MAX_SAFE_INTEGER],
+  ])("%j -> %d", (text, expected) => {
+    expect(parseEGP(text)).toBe(expected);
+  });
+
+  it.each([
+    "",
+    "   ",
+    "-5",
+    "+5",
+    "abc",
+    "12abc",
+    "1.005", // third decimal: refuse rather than round
+    "1.",
+    ".5",
+    "1,25", // malformed grouping
+    "1,2500",
+    "1.2.3",
+    "1e3",
+    "٣٠", // non-ASCII digits
+    "90071992547409.92", // MAX_SAFE_INTEGER + 1 piasters
+    "9".repeat(400),
+  ])("%j -> null", (text) => {
+    expect(parseEGP(text)).toBeNull();
   });
 });
