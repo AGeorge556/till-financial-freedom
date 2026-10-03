@@ -83,6 +83,21 @@ describe("applyAllocationRules", () => {
     expect(plan.distributed).toBe(1000);
   });
 
+  it("a clipped percentage rule reports its unclipped share as planned and the cut as shortfall", () => {
+    const plan = applyAllocationRules({ capacity: 1000, target: 1000, rules: [pct("a", 0.7), pct("b", 0.7)], overrides: [] });
+    expect(plan.rules.map((r) => r.planned)).toEqual([700, 700]);
+    expect(funded(plan)).toEqual([700, 300]);
+    expect(shortfalls(plan)).toEqual([0, 400]);
+  });
+
+  it("percentages take their share of what is left inside min(capacity, target) after fixed rules", () => {
+    const plan = run(30000, [fixed("g1", 1, 5000), pct("half", 0.5)], [], 12000);
+    // pool 12,000 - fixed 5,000 = 7,000 left; 50% of that, not of capacity or of the target
+    expect(funded(plan)).toEqual([egp(5000), egp(3500)]);
+    expect(plan.rules[1].planned).toBe(egp(3500));
+    expect(plan.unallocated).toBe(egp(3500));
+  });
+
   it("an override replaces one rule's amount for that month only and never edits the rule", () => {
     const rules = [fixed("g1", 1, 10000), fixed("g2", 2, 8000), remainder("r")];
     const normal = run(30000, rules);

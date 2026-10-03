@@ -7,6 +7,7 @@ import { accounts, categories, transactions } from "@/db/schema";
 import { requireUserId } from "@/lib/auth";
 import { parseEGP } from "@/lib/finance-core/money";
 import { cairoToday } from "@/lib/finance-core/time";
+import { voidInvestmentTransaction } from "./investments";
 import { type ActionState, id, isRealDate, str } from "./shared";
 
 const NOT_FOUND = "Transaction not found.";
@@ -118,6 +119,7 @@ export async function editTransaction(_prev: ActionState, formData: FormData): P
       .where(and(eq(transactions.id, txId), eq(transactions.userId, userId)))
       .for("update");
     if (!old) return NOT_FOUND;
+    if (old.holdingId) return "Buys, sells and dividends cannot be edited. Void it and enter the corrected one from the holding.";
     if (!isKind(old.type) || old.status === "void") return "This transaction cannot be edited.";
 
     const fields = parseFields(old.type, formData);
@@ -137,6 +139,13 @@ export async function voidTransaction(_prev: ActionState, formData: FormData): P
   const userId = await requireUserId();
   const txId = id(formData, "id");
   if (!txId) return { error: NOT_FOUND };
+
+  // A holding's rows must pass the position check (rule F) before they are voided.
+  const [row] = await db
+    .select({ holdingId: transactions.holdingId })
+    .from(transactions)
+    .where(and(eq(transactions.id, txId), eq(transactions.userId, userId)));
+  if (row?.holdingId) return voidInvestmentTransaction(_prev, formData);
 
   const voided = await db
     .update(transactions)

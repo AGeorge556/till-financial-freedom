@@ -61,6 +61,7 @@ export type GoalAllocationView = {
   accountArchived: boolean;
   amount: Piasters;
   free: Piasters;
+  /** The account's own over-allocation, shared by every goal earmarking money there. */
   over: Piasters;
 };
 
@@ -69,7 +70,10 @@ export type GoalView = {
   current: Piasters;
   currentSource: "allocations" | "manual";
   allocations: GoalAllocationView[];
-  /** Per account, at most what this goal holds there; summed. */
+  /**
+   * This goal's share of its accounts' over-allocation. Each account's figure is attributed across the goals
+   * earmarking there, newest allocation first, so the shares of all goals add up to exactly that figure.
+   */
   overAllocatedBy: Piasters;
   rate: number;
   rateSource: "override" | "blended";
@@ -173,6 +177,18 @@ export async function loadGoalData(userId: string, preloaded?: Preloaded): Promi
     };
   });
   const accountById = new Map(accountViews.map((a) => [a.id, a]));
+  const overShare = new Map<string, Piasters>(); // allocation id -> its share of the account's over-allocation
+  for (const acct of accountViews) {
+    let left = acct.over;
+    const newestFirst = allocRows
+      .filter((a) => a.accountId === acct.id)
+      .sort((x, y) => y.createdAt.getTime() - x.createdAt.getTime() || (x.id < y.id ? 1 : -1));
+    for (const a of newestFirst) {
+      const share = Math.min(a.amount, left);
+      overShare.set(a.id, share);
+      left -= share;
+    }
+  }
 
   // Rule H: the average of the 3 full financial months before this one, else what the owner entered.
   const ledger = txRows.map(toLedgerTx);
@@ -251,7 +267,7 @@ export async function loadGoalData(userId: string, preloaded?: Preloaded): Promi
         accountArchived: acct?.archived ?? false,
         amount: a.amount,
         free: acct?.free ?? 0,
-        over: Math.min(a.amount, acct?.over ?? 0),
+        over: acct?.over ?? 0,
       };
     });
     return {
@@ -259,7 +275,7 @@ export async function loadGoalData(userId: string, preloaded?: Preloaded): Promi
       current: current.amount,
       currentSource: current.source,
       allocations,
-      overAllocatedBy: sum(allocations.map((a) => a.over)),
+      overAllocatedBy: sum(allocs.map((a) => overShare.get(a.id) ?? 0)),
       rate: ret.rate,
       rateSource: ret.source,
       cashReturnMissing: ret.source === "blended" && allocs.length > 0 && assumptions.cashReturn === null,

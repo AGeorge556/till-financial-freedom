@@ -7,6 +7,7 @@ export const metadata: Metadata = { title: "More" };
 const links = [
   { href: "/more/accounts", title: "Accounts", hint: "Balances, add or archive an account" },
   { href: "/more/categories", title: "Categories", hint: "What you spend on and earn from" },
+  { href: "/more/assumptions", title: "Assumptions", hint: "Expected returns and when a price counts as old" },
   { href: "/more/backup", title: "Backup", hint: "Save a copy of your data" },
 ];
 

@@ -8,9 +8,13 @@ import {
   allocationOverrides,
   allocationRules,
   categories,
+  corporateActions,
+  financialAssumptions,
   goalAllocationEvents,
   goalAllocations,
   goals,
+  holdings,
+  priceUpdates,
   transactions,
   userSettings,
 } from "@/db/schema";
@@ -19,11 +23,11 @@ import { insertOrder, parseBackup } from "@/lib/backup";
 
 export type ImportState = {
   error?: string;
-  imported?: { accounts: number; categories: number; transactions: number; goals: number; rules: number };
+  imported?: { accounts: number; categories: number; transactions: number; goals: number; rules: number; holdings: number };
 };
 
 const MAX_BYTES = 5 * 1024 * 1024;
-// 17 columns (the widest table) x 1,000 rows stays under Postgres's 65,535 bind-parameter limit.
+// 20 columns (the widest table) x 1,000 rows stays under Postgres's 65,535 bind-parameter limit.
 const CHUNK = 1000;
 
 class Refused extends Error {}
@@ -93,12 +97,35 @@ export async function importBackup(_prev: ImportState, formData: FormData): Prom
           .insert(categories)
           .values(part.map((r) => ({ ...r, userId, archivedAt: when(r.archivedAt), createdAt: new Date(r.createdAt) })));
       }
+      // Dependency order: holdings need accounts; transactions, price updates and corporate actions need holdings.
+      for (const part of chunks(b.holdings)) {
+        await tx.insert(holdings).values(
+          part.map((r) => ({
+            ...r,
+            userId,
+            archivedAt: when(r.archivedAt),
+            createdAt: new Date(r.createdAt),
+            updatedAt: new Date(r.updatedAt),
+          })),
+        );
+      }
       // Replaced rows sort before the rows that replace them, so each replaces_id target exists when it is referenced.
       for (const part of chunks(insertOrder(b.transactions))) {
         await tx
           .insert(transactions)
           .values(part.map((r) => ({ ...r, userId, voidedAt: when(r.voidedAt), createdAt: new Date(r.createdAt) })));
       }
+      for (const part of chunks(b.priceUpdates)) {
+        await tx.insert(priceUpdates).values(part.map((r) => ({ ...r, userId, createdAt: new Date(r.createdAt) })));
+      }
+      for (const part of chunks(b.corporateActions)) {
+        await tx.insert(corporateActions).values(part.map((r) => ({ ...r, userId, createdAt: new Date(r.createdAt) })));
+      }
+      const assumptions = Object.fromEntries(Object.entries(b.assumptions).map(([k, v]) => [k, rateText(v)]));
+      await tx
+        .insert(financialAssumptions)
+        .values({ userId, ...assumptions })
+        .onConflictDoUpdate({ target: financialAssumptions.userId, set: { ...assumptions, updatedAt: new Date() } });
       // Dependency order: goals and rules before the rows that point at them.
       for (const part of chunks(b.goals)) {
         await tx.insert(goals).values(
@@ -147,6 +174,7 @@ export async function importBackup(_prev: ImportState, formData: FormData): Prom
       transactions: b.transactions.length,
       goals: b.goals.length,
       rules: b.allocationRules.length,
+      holdings: b.holdings.length,
     },
   };
 }

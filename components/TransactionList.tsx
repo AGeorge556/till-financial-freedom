@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
 import type { TxType } from "@/lib/finance-core/ledger";
 import { Amount } from "./Amount";
@@ -38,9 +39,11 @@ const TYPE_LABEL: Record<TxType, string> = {
 function tone(row: ListRow): { sign: string; cls: string; value: number } {
   switch (row.type) {
     case "EXPENSE":
-    case "INVESTMENT_PURCHASE":
     case "LIABILITY_PAYMENT":
       return { sign: "−", cls: "text-negative", value: row.amount };
+    case "INVESTMENT_PURCHASE":
+      // Cash out, but not spending.
+      return { sign: "−", cls: "", value: row.amount };
     case "INCOME":
     case "INVESTMENT_SALE":
     case "DIVIDEND":
@@ -52,6 +55,9 @@ function tone(row: ListRow): { sign: string; cls: string; value: number } {
       return { sign: row.amount < 0 ? "−" : "+", cls: "text-muted", value: Math.abs(row.amount) };
   }
 }
+
+const isInvestmentRow = (row: ListRow) =>
+  row.type === "INVESTMENT_PURCHASE" || row.type === "INVESTMENT_SALE" || row.type === "DIVIDEND";
 
 const isEditable = (row: ListRow) =>
   row.status !== "void" && (row.type === "EXPENSE" || row.type === "INCOME" || row.type === "TRANSFER");
@@ -131,6 +137,16 @@ export function TransactionList({
         >
           {showVoided ? "Hide voided" : `Show voided (${voidedCount})`}
         </button>
+      )}
+
+      {visible.some(isInvestmentRow) && (
+        <p className="mt-4 text-sm text-muted">
+          Investment buys, sales and dividends are not spending. Change or void them on the holding&apos;s page in{" "}
+          <Link href="/investments" className="underline">
+            Investments
+          </Link>
+          .
+        </p>
       )}
 
       {visible.length === 0 ? (

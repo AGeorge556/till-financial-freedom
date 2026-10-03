@@ -112,9 +112,10 @@ export function applyAllocationRules(input: {
   const base = left;
   for (const r of sorted) {
     if (r.kind !== "percentage" || outcome.has(r.id)) continue;
-    const funded = Math.min(percentOf(base, r.percent ?? 0), left);
+    const planned = percentOf(base, r.percent ?? 0);
+    const funded = Math.min(planned, left);
     left -= funded;
-    outcome.set(r.id, { ruleId: r.id, planned: funded, funded, shortfall: 0 });
+    outcome.set(r.id, { ruleId: r.id, planned, funded, shortfall: planned - funded });
   }
 
   for (const r of sorted) {

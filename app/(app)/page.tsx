@@ -6,16 +6,18 @@ import { formatRange } from "@/components/dates";
 import { EmptyState } from "@/components/EmptyState";
 import { GoalCard } from "@/components/GoalCard";
 import { GoalPlanCard } from "@/components/GoalPlanCard";
+import { HoldingPL } from "@/components/HoldingPL";
 import { card } from "@/components/ui";
 import { accountBalances, getSettings, listAccounts, listTransactions, toLedgerTx } from "@/db/queries";
 import { requireUserId } from "@/lib/auth";
 import { filterByDateRange, netWorth, periodSummary } from "@/lib/finance-core/ledger";
 import { cairoToday, financialMonth } from "@/lib/finance-core/time";
 import { loadGoalData } from "./goals/data";
+import { holdingsByAccount, loadInvestments } from "./investments/data";
 
-function Stat({ label, children }: { label: string; children: ReactNode }) {
+function Stat({ label, className, children }: { label: string; className?: string; children: ReactNode }) {
   return (
-    <div>
+    <div className={className}>
       <dt className="text-sm text-muted">{label}</dt>
       <dd className="mt-0.5 text-xl font-semibold tracking-tight">{children}</dd>
     </div>
@@ -24,10 +26,12 @@ function Stat({ label, children }: { label: string; children: ReactNode }) {
 
 export default async function Home() {
   const userId = await requireUserId();
-  const [accounts, txRows, settings] = await Promise.all([
+  const today = cairoToday();
+  const [accounts, txRows, settings, inv] = await Promise.all([
     listAccounts(userId, { includeArchived: true }),
     listTransactions(userId),
     getSettings(userId),
+    loadInvestments(userId, today),
   ]);
 
   if (accounts.length === 0) {
@@ -51,12 +55,14 @@ export default async function Home() {
   const sumOf = (investment: boolean) =>
     accounts.filter((a) => a.isInvestment === investment).reduce((sum, a) => sum + (balances.get(a.id) ?? 0), 0);
   const cash = sumOf(false);
-  const investments = sumOf(true);
+  const investmentCash = sumOf(true);
+  const investments = netWorth({ cash: investmentCash, holdings: inv.total, liabilities: 0 });
   // Archived accounts still hold money, so they stay in net worth; only the list below hides them.
-  const total = netWorth({ cash, holdings: investments, liabilities: 0 });
+  const total = netWorth({ cash: cash + investmentCash, holdings: inv.total, liabilities: 0 });
+  const heldIn = holdingsByAccount(inv.views);
+  const activeHoldings = inv.views.filter((v) => !v.row.archivedAt);
   const archivedCount = accounts.filter((a) => a.archivedAt).length;
 
-  const today = cairoToday();
   const { start, end } = financialMonth(today, settings.monthStartDay);
   const month = periodSummary(filterByDateRange(txRows.map(toLedgerTx), start, end));
   const percent = month.savingsRate === null ? null : Math.round(month.savingsRate * 100);
@@ -83,9 +89,22 @@ export default async function Home() {
             <dt className="text-sm text-muted">Investments</dt>
             <dd className="font-medium">
               <Amount value={investments} />
+              {inv.views.length > 0 && (
+                <span className="block text-sm font-normal text-muted">
+                  Holdings <Amount value={inv.total} /> + cash <Amount value={investmentCash} />
+                </span>
+              )}
             </dd>
           </div>
         </dl>
+        {inv.stale && (
+          <p className="mt-3 text-sm text-negative">
+            ▲ Includes values last updated more than {inv.staleDays} days ago, or never updated.{" "}
+            <Link href="/investments" className="underline">
+              Update prices
+            </Link>
+          </p>
+        )}
       </div>
 
       <section className={`mt-8 p-5 ${card}`}>
@@ -104,7 +123,36 @@ export default async function Home() {
             <Amount value={month.savings} className={month.savings < 0 ? "text-negative" : ""} />
           </Stat>
           <Stat label="Savings rate">{rate}</Stat>
+          <Stat label="Invested" className="col-span-2">
+            <Amount value={month.invested} />
+            <span className="mt-0.5 block text-sm font-normal text-muted">
+              Net invested (bought minus sold) <Amount value={month.netInvested} />
+            </span>
+          </Stat>
         </dl>
+      </section>
+
+      <section className={`mt-8 p-5 ${card}`}>
+        <div className="flex items-baseline justify-between gap-3">
+          <h2 className="text-lg font-semibold tracking-tight">Portfolio</h2>
+          <Link href="/investments" className="inline-flex min-h-11 items-center text-sm underline">
+            {activeHoldings.length > 0 ? "Open" : "Add a holding"}
+          </Link>
+        </div>
+        {activeHoldings.length === 0 ? (
+          <p className="text-muted">No holdings yet.</p>
+        ) : (
+          <>
+            <dl className="mt-1 grid grid-cols-2 gap-x-4 gap-y-5">
+              <Stat label="Holdings value">
+                <Amount value={inv.total} />
+              </Stat>
+              <Stat label="Profit or loss on what you hold">
+                <HoldingPL value={inv.unrealized} />
+              </Stat>
+            </dl>
+          </>
+        )}
       </section>
 
       <section className="mt-8">
@@ -146,7 +194,7 @@ export default async function Home() {
           <AccountList
             accounts={accounts
               .filter((a) => !a.archivedAt)
-              .map((a) => ({ ...a, balance: balances.get(a.id) ?? 0 }))}
+              .map((a) => ({ ...a, balance: balances.get(a.id) ?? 0, holdings: a.isInvestment ? (heldIn.get(a.id) ?? 0) : undefined }))}
           />
         ) : (
           <p className="text-muted">All your accounts are archived.</p>
