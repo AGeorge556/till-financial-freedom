@@ -15,6 +15,7 @@ import {
   listPriceUpdateRows,
   listRules,
   listTransactions,
+  listWealthRows,
 } from "@/db/queries";
 import { requireUserId } from "@/lib/auth";
 import { serializeBackup, transactionsToCsv } from "@/lib/backup";
@@ -32,12 +33,13 @@ async function readPlanning(userId: string) {
   return { goals, goalAllocations, goalAllocationEvents, allocationRules, allocationOverrides };
 }
 
-/** Price updates and corporate actions (children), then holdings; holdings are archived, never deleted. */
+/** Children first (prices, rates, confirmations, loan updates), then the holdings and loans they point at. */
 async function readInvestments(userId: string) {
+  const wealth = await listWealthRows(userId);
   const priceUpdates = await listPriceUpdateRows(userId);
   const corporateActions = await listCorporateActions(userId);
   const holdings = await listHoldings(userId, { includeArchived: true });
-  return { holdings, priceUpdates, corporateActions };
+  return { ...wealth, holdings, priceUpdates, corporateActions };
 }
 
 export async function GET(request: NextRequest) {

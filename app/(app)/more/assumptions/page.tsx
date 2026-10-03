@@ -1,15 +1,15 @@
 import type { Metadata } from "next";
 import { ratePercentText } from "@/components/GoalFormat";
 import { BackLink, card } from "@/components/ui";
-import { getAssumptions, getStaleDays } from "@/db/queries";
+import { getAssumptions, getWealthSettings } from "@/db/queries";
 import { requireUserId } from "@/lib/auth";
-import { AssumptionsForm, StaleDaysForm } from "./AssumptionsForms";
+import { AssumptionsForm, GoldModeForm, StaleDaysCloudsForm, StaleDaysForm, StaleDaysGoldForm } from "./AssumptionsForms";
 
 export const metadata: Metadata = { title: "Assumptions" };
 
 export default async function Page() {
   const userId = await requireUserId();
-  const [a, staleDays] = await Promise.all([getAssumptions(userId), getStaleDays(userId)]);
+  const [a, w] = await Promise.all([getAssumptions(userId), getWealthSettings(userId)]);
 
   return (
     <>
@@ -36,12 +36,25 @@ export default async function Page() {
       </section>
 
       <section className="mt-8">
-        <h2 className="mb-2 text-lg font-semibold tracking-tight">Old prices</h2>
+        <h2 className="mb-2 text-lg font-semibold tracking-tight">Gold prices</h2>
         <div className={`p-5 ${card}`}>
           <p className="mb-4 text-sm text-muted">
-            You type in prices yourself, so they age. A holding is marked stale when its latest price is older than this.
+            Gold is valued at the buy-back price per gram, what a jeweler would pay you. Changing this keeps every price you
+            already entered.
           </p>
-          <StaleDaysForm days={staleDays} />
+          <GoldModeForm mode={w.goldPriceMode} />
+        </div>
+      </section>
+
+      <section className="mt-8">
+        <h2 className="mb-2 text-lg font-semibold tracking-tight">Old values</h2>
+        <div className={`space-y-8 p-5 ${card}`}>
+          <p className="text-sm text-muted">
+            You type in prices and confirmed values yourself, so they age. A value is marked stale when it is older than these.
+          </p>
+          <StaleDaysForm days={w.staleDaysHoldings} />
+          <StaleDaysGoldForm days={w.staleDaysGold} />
+          <StaleDaysCloudsForm days={w.staleDaysClouds} />
         </div>
       </section>
     </>

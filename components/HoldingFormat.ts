@@ -1,7 +1,13 @@
 // Display-only helpers for the holding screens. No formula here decides a financial result.
 import { formatDay } from "./dates";
 
-export const KIND_LABEL = { stock: "Stock", fund: "Fund", other: "Other" } as const;
+export const KIND_LABEL = { stock: "Stock", fund: "Fund", other: "Other", gold: "Gold", cloud: "Savings Cloud" } as const;
+
+export const GOLD_FORM_LABEL = { bar: "bar", coin: "coin", jewelry: "jewelry" } as const;
+
+/** "21K coin". */
+export const goldName = (karat: number | null, form: keyof typeof GOLD_FORM_LABEL | null) =>
+  `${karat ?? "?"}K ${form ? GOLD_FORM_LABEL[form] : "gold"}`;
 
 /** "3 Oct 2026". */
 export const dateText = (iso: string) => `${formatDay(iso)} ${iso.slice(0, 4)}`;
@@ -13,8 +19,18 @@ export function plain(value: string): string {
   return `${whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}${trimmed ? `.${trimmed}` : ""}`;
 }
 
-export function updatedText(source: "price" | "last-transaction" | "none", days: number | null): string {
-  if (source === "none") return "No price yet";
-  if (source === "last-transaction") return "No price update yet, valued at last transaction price";
-  return days === null || days === 0 ? "Last updated today" : `Last updated ${days} ${days === 1 ? "day" : "days"} ago`;
+const ago = (days: number | null, word: string) =>
+  days === null || days === 0 ? `${word} today` : `${word} ${days} ${days === 1 ? "day" : "days"} ago`;
+
+export function updatedText(source: "price" | "last-transaction" | "none", days: number | null, gold = false): string {
+  if (source === "none") return gold ? "No gold price yet" : "No price yet";
+  if (source === "last-transaction") {
+    return gold
+      ? "No gold price entered yet, valued at your last transaction price"
+      : "No price update yet, valued at last transaction price";
+  }
+  return ago(days, "Last updated");
 }
+
+/** A cloud is stale by its latest confirmation, not by a price. */
+export const confirmedText = (days: number | null) => (days === null ? "Never confirmed" : ago(days, "Last confirmed"));

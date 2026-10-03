@@ -3,17 +3,83 @@
 import { and, eq, isNull } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { db } from "@/db";
-import { listHoldingEvents } from "@/db/queries";
-import { accounts, holdingKind, holdings } from "@/db/schema";
+import { listCloudRecords, listHoldingEvents } from "@/db/queries";
+import { accounts, contributionFrequency, goldForm, holdingKind, holdings } from "@/db/schema";
 import { requireUserId } from "@/lib/auth";
+import { cloudEstimate } from "@/lib/finance-core/clouds";
+import { KARATS } from "@/lib/finance-core/gold";
+import { parseEGP } from "@/lib/finance-core/money";
 import { replayHolding } from "@/lib/finance-core/portfolio";
-import { type ActionState, id, NAME_ERROR, str, validName } from "./shared";
+import { cairoToday } from "@/lib/finance-core/time";
+import { type ActionState, id, isRealDate, NAME_ERROR, str, validName } from "./shared";
 
 const NOT_FOUND = "Holding not found.";
 const MAX_TICKER = 20;
 const MAX_NOTES = 1000;
 
 type Kind = (typeof holdingKind.enumValues)[number];
+
+// Only the constraint names this file can trip, translated; anything else is a bug and propagates.
+const KNOWN_VIOLATIONS: Record<string, string> = {
+  holdings_gold_fields_check: "Gold needs a karat and a form; nothing else has either.",
+  holdings_cloud_fields_check: "Only a Savings Cloud has dates and a contribution.",
+  holdings_cloud_values_check: "Check the maturity date and the contribution.",
+};
+
+function knownViolation(e: unknown): string | undefined {
+  const name = (e as { cause?: { constraint_name?: string } })?.cause?.constraint_name;
+  return name ? KNOWN_VIOLATIONS[name] : undefined;
+}
+
+type Specific = Pick<
+  typeof holdings.$inferInsert,
+  "karat" | "form" | "startDate" | "maturityDate" | "contributionAmount" | "contributionFrequency"
+>;
+const NO_SPECIFIC: Specific = {
+  karat: null,
+  form: null,
+  startDate: null,
+  maturityDate: null,
+  contributionAmount: null,
+  contributionFrequency: null,
+};
+
+/** Gold: karat and form. A karat cannot change after purchases, so these are only read at creation. */
+function parseGold(formData: FormData): Specific | string {
+  const karatText = str(formData, "karat");
+  const form = str(formData, "form") as (typeof goldForm.enumValues)[number];
+  const karat = KARATS.find((k) => String(k) === karatText);
+  if (karat === undefined) return "Choose 24, 21 or 18 karat.";
+  if (!goldForm.enumValues.includes(form)) return "Choose bar, coin or jewelry.";
+  return { ...NO_SPECIFIC, karat, form };
+}
+
+// ponytail: same cloud-field parsing as clouds.ts updateCloud (a "use server" file cannot export it); move to shared.ts if a third copy appears.
+/** Savings Cloud: start date (asked for, though the database does not require it), optional maturity and contribution. */
+function parseCloud(formData: FormData): Specific | string {
+  const startDate = str(formData, "startDate");
+  if (!isRealDate(startDate)) return "Enter the date the cloud started.";
+  const maturity = str(formData, "maturityDate");
+  if (maturity && !isRealDate(maturity)) return "Enter a valid maturity date, or leave it blank.";
+  if (maturity && maturity < startDate) return "The maturity date must be on or after the start date.";
+  const amountText = str(formData, "contributionAmount");
+  const frequencyText = str(formData, "contributionFrequency");
+  const frequency = frequencyText as (typeof contributionFrequency.enumValues)[number];
+  if ((amountText === "") !== (frequencyText === "")) return "Enter both a contribution and how often, or neither.";
+  let contributionAmount: number | null = null;
+  if (amountText !== "") {
+    contributionAmount = parseEGP(amountText);
+    if (contributionAmount === null || contributionAmount === 0) return "Enter a contribution like 1,250.50, above zero.";
+    if (!contributionFrequency.enumValues.includes(frequency)) return "Choose weekly or monthly.";
+  }
+  return {
+    ...NO_SPECIFIC,
+    startDate,
+    maturityDate: maturity || null,
+    contributionAmount,
+    contributionFrequency: contributionAmount === null ? null : frequency,
+  };
+}
 
 /** Name, ticker and notes: the only fields a holding lets you change. */
 function parseText(formData: FormData) {
@@ -30,28 +96,37 @@ function parseText(formData: FormData) {
 export async function createHolding(_prev: ActionState, formData: FormData): Promise<ActionState> {
   const userId = await requireUserId();
   const kind = str(formData, "kind") as Kind;
-  if (!holdingKind.enumValues.includes(kind)) return { error: "Choose stock, fund or other." };
+  if (!holdingKind.enumValues.includes(kind)) return { error: "Choose stock, fund, gold, Savings Cloud or other." };
   const text = parseText(formData);
   if (typeof text === "string") return { error: text };
+  const specific = kind === "gold" ? parseGold(formData) : kind === "cloud" ? parseCloud(formData) : NO_SPECIFIC;
+  if (typeof specific === "string") return { error: specific };
   const accountId = id(formData, "accountId");
 
-  const error = await db.transaction(async (tx) => {
-    const [account] = accountId
-      ? await tx
-          .select({ id: accounts.id })
-          .from(accounts)
-          .where(
-            and(
-              eq(accounts.id, accountId),
-              eq(accounts.userId, userId),
-              eq(accounts.isInvestment, true),
-              isNull(accounts.archivedAt),
-            ),
-          )
-      : [];
-    if (!account) return "Choose one of your investment accounts, like Thndr.";
-    await tx.insert(holdings).values({ userId, accountId: account.id, kind, ...text });
-  });
+  let error: string | undefined;
+  try {
+    error = await db.transaction(async (tx) => {
+      const [account] = accountId
+        ? await tx
+            .select({ id: accounts.id })
+            .from(accounts)
+            .where(
+              and(
+                eq(accounts.id, accountId),
+                eq(accounts.userId, userId),
+                eq(accounts.isInvestment, true),
+                isNull(accounts.archivedAt),
+              ),
+            )
+        : [];
+      if (!account) return "Choose one of your investment accounts, like Thndr.";
+      await tx.insert(holdings).values({ userId, accountId: account.id, kind, ...text, ...specific });
+    });
+  } catch (e) {
+    const message = knownViolation(e);
+    if (!message) throw e;
+    return { error: message };
+  }
   if (error) return { error };
   revalidatePath("/", "layout");
   return {};
@@ -88,9 +163,16 @@ async function setArchived(formData: FormData, archived: boolean): Promise<Actio
       .for("update");
     if (!holding || (archived ? holding.archivedAt !== null : holding.archivedAt === null)) return NOT_FOUND;
 
-    if (archived) {
+    if (archived && holding.kind === "cloud") {
+      const { value } = cloudEstimate({ ...(await listCloudRecords(userId, holdingId, tx)), asOf: cairoToday() });
+      if (value !== 0) return "Withdraw the rest of this cloud, or confirm its value as zero, before archiving it.";
+    } else if (archived) {
       const { quantity } = replayHolding(await listHoldingEvents(userId, holdingId, tx));
-      if (quantity !== "0") return "Sell or write off the remaining units before archiving this holding.";
+      if (quantity !== "0") {
+        return holding.kind === "gold"
+          ? "Sell or write off the remaining gold before archiving this holding."
+          : "Sell or write off the remaining units before archiving this holding.";
+      }
     }
     await tx
       .update(holdings)

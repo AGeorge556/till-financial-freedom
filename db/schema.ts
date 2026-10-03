@@ -62,7 +62,11 @@ export const transactionType = pgEnum("transaction_type", [
   "ADJUSTMENT",
 ]);
 export const transactionStatus = pgEnum("transaction_status", ["pending", "posted", "void"]);
-export const holdingKind = pgEnum("holding_kind", ["stock", "fund", "other"]);
+export const holdingKind = pgEnum("holding_kind", ["stock", "fund", "other", "gold", "cloud"]);
+export const goldForm = pgEnum("gold_form", ["bar", "coin", "jewelry"]);
+export const contributionFrequency = pgEnum("contribution_frequency", ["weekly", "monthly"]);
+export const goldPriceMode = pgEnum("gold_price_mode", ["derive_24k", "per_karat"]);
+export const liabilityKind = pgEnum("liability_kind", ["loan", "owed", "other"]);
 export const corporateActionKind = pgEnum("corporate_action_kind", ["BONUS", "SPLIT", "WRITE_OFF"]);
 export const savingsTargetMode = pgEnum("savings_target_mode", ["fixed", "percentage", "flexible"]);
 export const allocationRuleKind = pgEnum("allocation_rule_kind", ["fixed", "percentage", "remainder"]);
@@ -79,12 +83,17 @@ export const userSettings = pgTable(
     expectedMonthlyIncome: piasters("expected_monthly_income"),
     expectedMonthlySpending: piasters("expected_monthly_spending"),
     staleDaysHoldings: integer("stale_days_holdings").notNull().default(7),
+    goldPriceMode: goldPriceMode("gold_price_mode").notNull().default("derive_24k"),
+    staleDaysGold: integer("stale_days_gold").notNull().default(14),
+    staleDaysClouds: integer("stale_days_clouds").notNull().default(30),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
   () => [
     check("user_settings_month_start_day_range", sql`month_start_day between 1 and 28`),
     check("user_settings_stale_days_holdings_range", sql`stale_days_holdings between 1 and 365`),
+    check("user_settings_stale_days_gold_range", sql`stale_days_gold between 1 and 365`),
+    check("user_settings_stale_days_clouds_range", sql`stale_days_clouds between 1 and 365`),
     ownerOnly("user_settings"),
   ],
 ).enableRLS();
@@ -124,7 +133,8 @@ export const categories = pgTable(
 // Quantities and unit prices are NUMERIC(20,6) and travel as decimal strings (lib/finance-core/holdings.ts).
 const decimal6 = (name: string) => numeric(name, { precision: 20, scale: 6 });
 
-// Unit-based holdings (stock, fund, other). Quantity, cost basis and P/L are replayed from events, never stored.
+// Holdings: unit-based (stock, fund, other), physical gold (grams, with karat and form) or a value-based Savings Cloud.
+// Quantity, cost basis and P/L are replayed from events, never stored.
 export const holdings = pgTable(
   "holdings",
   {
@@ -137,11 +147,85 @@ export const holdings = pgTable(
     name: text("name").notNull(),
     ticker: text("ticker"),
     notes: text("notes"),
+    // Gold only.
+    karat: integer("karat"),
+    form: goldForm("form"),
+    // Savings Cloud only; the contribution is used for projections, never booked.
+    startDate: date("start_date", { mode: "string" }),
+    maturityDate: date("maturity_date", { mode: "string" }),
+    contributionAmount: piasters("contribution_amount"),
+    contributionFrequency: contributionFrequency("contribution_frequency"),
     archivedAt: timestamp("archived_at", { withTimezone: true }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
-  () => [ownerOnly("holdings")],
+  (t) => [
+    // ::text, not the enum literal: 'gold' and 'cloud' are added in the same migration transaction and cannot be used until it commits.
+    check(
+      "holdings_gold_fields_check",
+      sql`(${t.kind}::text = 'gold' and ${t.karat} in (24, 21, 18) and ${t.form} is not null)
+        or (${t.kind}::text <> 'gold' and ${t.karat} is null and ${t.form} is null)`,
+    ),
+    check(
+      "holdings_cloud_fields_check",
+      sql`${t.kind}::text = 'cloud' or (
+        ${t.startDate} is null and ${t.maturityDate} is null
+        and ${t.contributionAmount} is null and ${t.contributionFrequency} is null
+      )`,
+    ),
+    check(
+      "holdings_cloud_values_check",
+      sql`(${t.maturityDate} is null or ${t.startDate} is null or ${t.maturityDate} >= ${t.startDate})
+        and (${t.contributionAmount} is null) = (${t.contributionFrequency} is null)
+        and (${t.contributionAmount} is null or ${t.contributionAmount} > 0)`,
+    ),
+    ownerOnly("holdings"),
+  ],
+).enableRLS();
+
+// Money owed by the user. Credit cards stay accounts. Balance = opening + updates - posted principal payments.
+export const liabilities = pgTable(
+  "liabilities",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: userId(),
+    name: text("name").notNull(),
+    kind: liabilityKind("kind").notNull(),
+    openingBalance: piasters("opening_balance").notNull(),
+    // Display only; interest actually paid is entered per payment.
+    interestRate: numeric("interest_rate", { precision: 8, scale: 6 }),
+    startDate: date("start_date", { mode: "string" }).notNull(),
+    notes: text("notes"),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    check("liabilities_opening_balance_check", sql`${t.openingBalance} > 0`),
+    check("liabilities_interest_rate_check", sql`${t.interestRate} is null or ${t.interestRate} >= 0`),
+    ownerOnly("liabilities"),
+  ],
+).enableRLS();
+
+// Append-only: a change that moves no cash (borrowed more, correction). Signed: + owes more, - owes less.
+export const liabilityUpdates = pgTable(
+  "liability_updates",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: userId(),
+    liabilityId: uuid("liability_id")
+      .notNull()
+      .references(() => liabilities.id, { onDelete: "cascade" }),
+    date: date("date", { mode: "string" }).notNull(),
+    delta: piasters("delta").notNull(),
+    note: text("note"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    check("liability_updates_delta_check", sql`${t.delta} <> 0`),
+    index("liability_updates_liability_date_idx").on(t.liabilityId, t.date),
+    ownerOnly("liability_updates"),
+  ],
 ).enableRLS();
 
 export const transactions = pgTable(
@@ -165,6 +249,7 @@ export const transactions = pgTable(
     holdingId: uuid("holding_id").references(() => holdings.id),
     quantity: decimal6("quantity"),
     unitPrice: decimal6("unit_price"),
+    liabilityId: uuid("liability_id").references(() => liabilities.id),
     replacesId: uuid("replaces_id").references((): AnyPgColumn => transactions.id),
     voidedAt: timestamp("voided_at", { withTimezone: true }),
     createdAt: createdAt(),
@@ -191,11 +276,19 @@ export const transactions = pgTable(
       sql`${t.holdingId} is null or ${t.type} in ('INVESTMENT_PURCHASE', 'INVESTMENT_SALE', 'DIVIDEND')`,
     ),
     check(
+      "transactions_liability_type_check",
+      sql`${t.liabilityId} is null or ${t.type} in ('LIABILITY_PAYMENT', 'EXPENSE')`,
+    ),
+    // Quantity and unit price travel together on investment rows: both set (unit-based, gold) or both null (cloud
+    // deposit or withdrawal). Which one is right depends on the holding's kind, which only application code can see.
+    check(
       "transactions_quantity_price_check",
       sql`(
         ${t.type} in ('INVESTMENT_PURCHASE', 'INVESTMENT_SALE') and ${t.holdingId} is not null
-          and ${t.quantity} is not null and ${t.quantity} > 0
-          and ${t.unitPrice} is not null and ${t.unitPrice} >= 0
+          and (
+            (${t.quantity} is not null and ${t.quantity} > 0 and ${t.unitPrice} is not null and ${t.unitPrice} >= 0)
+            or (${t.quantity} is null and ${t.unitPrice} is null)
+          )
       ) or (
         (${t.type} not in ('INVESTMENT_PURCHASE', 'INVESTMENT_SALE') or ${t.holdingId} is null)
           and ${t.quantity} is null and ${t.unitPrice} is null
@@ -263,6 +356,66 @@ export const corporateActions = pgTable(
 // Nullable on purpose: assumptions are user-set, never hard-coded defaults.
 const rate = (name: string) => numeric(name, { precision: 8, scale: 6 });
 
+// Gold prices are global, not per holding: the BUY-BACK price per gram. Append-only, a newer row supersedes (step function).
+// In derive_24k mode only karat 24 rows are used; the other karats are derived.
+export const goldPrices = pgTable(
+  "gold_prices",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: userId(),
+    date: date("date", { mode: "string" }).notNull(),
+    karat: integer("karat").notNull(),
+    buybackPrice: decimal6("buyback_price").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    check("gold_prices_karat_check", sql`${t.karat} in (24, 21, 18)`),
+    check("gold_prices_price_check", sql`${t.buybackPrice} >= 0`),
+    index("gold_prices_user_karat_date_idx").on(t.userId, t.karat, t.date),
+    ownerOnly("gold_prices"),
+  ],
+).enableRLS();
+
+// Append-only: an APY change is a new row with an effective date, never an edit. Effective annual rate (0.20 = 20%).
+export const rateHistory = pgTable(
+  "rate_history",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: userId(),
+    holdingId: uuid("holding_id")
+      .notNull()
+      .references(() => holdings.id, { onDelete: "cascade" }),
+    effectiveDate: date("effective_date", { mode: "string" }).notNull(),
+    apy: rate("apy").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    check("rate_history_apy_check", sql`${t.apy} > -1`),
+    index("rate_history_holding_date_idx").on(t.holdingId, t.effectiveDate),
+    ownerOnly("rate_history"),
+  ],
+).enableRLS();
+
+// Append-only: the value the user read off the product. The latest one is the anchor of the cloud's estimate.
+export const cloudConfirmations = pgTable(
+  "cloud_confirmations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: userId(),
+    holdingId: uuid("holding_id")
+      .notNull()
+      .references(() => holdings.id, { onDelete: "cascade" }),
+    date: date("date", { mode: "string" }).notNull(),
+    value: piasters("value").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    check("cloud_confirmations_value_check", sql`${t.value} >= 0`),
+    index("cloud_confirmations_holding_date_idx").on(t.holdingId, t.date),
+    ownerOnly("cloud_confirmations"),
+  ],
+).enableRLS();
+
 export const financialAssumptions = pgTable(
   "financial_assumptions",
   {
@@ -306,7 +459,8 @@ export const goals = pgTable(
   ],
 ).enableRLS();
 
-// A goal is an earmark: it holds fixed amounts of money that stays in the account.
+// A goal is an earmark. A cash allocation holds a fixed amount of an account's money; a holding allocation is a
+// percentage share (0 < p <= 1) of a holding's current value, so it moves with the market. Neither moves any money.
 export const goalAllocations = pgTable(
   "goal_allocations",
   {
@@ -315,16 +469,26 @@ export const goalAllocations = pgTable(
     goalId: uuid("goal_id")
       .notNull()
       .references(() => goals.id, { onDelete: "cascade" }),
-    accountId: uuid("account_id")
-      .notNull()
-      .references(() => accounts.id),
-    amount: piasters("amount").notNull(),
+    accountId: uuid("account_id").references(() => accounts.id),
+    amount: piasters("amount"),
+    holdingId: uuid("holding_id").references(() => holdings.id),
+    percent: rate("percent"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
   (t) => [
-    check("goal_allocations_amount_check", sql`${t.amount} > 0`),
+    check(
+      "goal_allocations_shape_check",
+      sql`(
+        ${t.accountId} is not null and ${t.amount} is not null and ${t.amount} > 0
+          and ${t.holdingId} is null and ${t.percent} is null
+      ) or (
+        ${t.holdingId} is not null and ${t.percent} is not null and ${t.percent} > 0 and ${t.percent} <= 1
+          and ${t.accountId} is null and ${t.amount} is null
+      )`,
+    ),
     unique("goal_allocations_goal_account_unique").on(t.goalId, t.accountId),
+    unique("goal_allocations_goal_holding_unique").on(t.goalId, t.holdingId),
     ownerOnly("goal_allocations"),
   ],
 ).enableRLS();
@@ -338,9 +502,10 @@ export const goalAllocationEvents = pgTable(
     goalId: uuid("goal_id")
       .notNull()
       .references(() => goals.id, { onDelete: "cascade" }),
-    accountId: uuid("account_id")
-      .notNull()
-      .references(() => accounts.id),
+    accountId: uuid("account_id").references(() => accounts.id),
+    holdingId: uuid("holding_id").references(() => holdings.id),
+    // Signed share change for a holding event; `delta` stays the EGP value of the change at that moment.
+    percentDelta: rate("percent_delta"),
     delta: piasters("delta").notNull(),
     date: date("date", { mode: "string" }).notNull(),
     note: text("note"),
@@ -348,6 +513,14 @@ export const goalAllocationEvents = pgTable(
   },
   (t) => [
     check("goal_allocation_events_delta_check", sql`${t.delta} <> 0`),
+    check(
+      "goal_allocation_events_shape_check",
+      sql`(
+        ${t.accountId} is not null and ${t.holdingId} is null and ${t.percentDelta} is null
+      ) or (
+        ${t.holdingId} is not null and ${t.accountId} is null and ${t.percentDelta} is not null and ${t.percentDelta} <> 0
+      )`,
+    ),
     index("goal_allocation_events_user_date_idx").on(t.userId, t.date),
     ownerOnly("goal_allocation_events"),
   ],

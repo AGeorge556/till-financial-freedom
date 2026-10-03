@@ -3,8 +3,9 @@ import { notFound } from "next/navigation";
 import { Amount } from "@/components/Amount";
 import { formatDay, formatMonthYear } from "@/components/dates";
 import { GoalBadges, GoalFigures, GoalProgressBar, GoalStatusLine } from "@/components/GoalCard";
-import { formatRate } from "@/components/GoalFormat";
-import { AllocationForm, ArchiveGoalButton, EditGoalButton } from "@/components/GoalForms";
+import { formatRate, sharePercentText } from "@/components/GoalFormat";
+import { AllocationForm, ArchiveGoalButton, EditGoalButton, HoldingShareForm } from "@/components/GoalForms";
+import { KIND_LABEL } from "@/components/HoldingFormat";
 import { GoalWhatIf } from "@/components/GoalWhatIf";
 import { BackLink, card } from "@/components/ui";
 import { requireUserId } from "@/lib/auth";
@@ -27,7 +28,9 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
   const archived = goal.archivedAt !== null;
 
   // Cash accounts only; a goal's existing earmark stays reachable even on an archived account, so it can be released.
-  const heldOn = new Set(view.allocations.map((a) => a.accountId));
+  const cashSources = view.allocations.flatMap((a) => (a.kind === "cash" ? [a] : []));
+  const holdingSources = view.allocations.flatMap((a) => (a.kind === "holding" ? [a] : []));
+  const heldOn = new Set(cashSources.map((a) => a.accountId));
   const choices = data.accounts
     .filter(
       (a) =>
@@ -40,19 +43,27 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
       id: a.id,
       name: a.name,
       archived: a.archived,
-      current: view.allocations.find((x) => x.accountId === a.id)?.amount ?? 0,
+      current: cashSources.find((x) => x.accountId === a.id)?.amount ?? 0,
       free: a.free,
     }));
 
   const accountName = new Map(data.accounts.map((a) => [a.id, a.name]));
+  const holdingName = new Map(data.holdings.map((h) => [h.id, h.name]));
+  // A holding stays reachable while this goal still holds a share of it, even archived, so the share can be released.
+  const shareChoices = data.holdings
+    .map((h) => ({
+      ...h,
+      current: holdingSources.find((x) => x.holdingId === h.id)?.percent ?? "0",
+    }))
+    .filter((h) => !h.archived || h.current !== "0");
   const history = data.events.filter((e) => e.goalId === id).slice(0, 10);
 
   const returnLine =
     view.rateSource === "override"
       ? `Projection assumes ${formatRate(view.rate)} a year (your override)`
       : view.allocations.length === 0
-        ? `Projection assumes ${formatRate(view.rate)} a year (no linked accounts yet)`
-        : `Projection assumes ${formatRate(view.rate)} a year (blended from linked accounts)`;
+        ? `Projection assumes ${formatRate(view.rate)} a year (nothing linked yet)`
+        : `Projection assumes ${formatRate(view.rate)} a year (blended from your funding sources, weighted by their value)`;
 
   return (
     <>
@@ -80,7 +91,8 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
         <GoalFigures view={view} />
         <p className="mt-3 text-sm text-muted">
           {returnLine}.{" "}
-          {view.cashReturnMissing && "You have not set a return for cash, so linked accounts count as 0%. "}
+          {view.returnsMissing.length > 0 &&
+            `You have not set a return for ${view.returnsMissing.join(" and ")}, so ${view.returnsMissing.length > 1 ? "they count" : "it counts"} as 0%. `}
           Projections are assumptions, not guarantees.
         </p>
         {view.ruleShortfall > 0 && (
@@ -95,31 +107,51 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
         {view.allocations.length === 0 ? (
           <p className="text-muted">
             {view.currentSource === "manual"
-              ? "No account is linked, so the amount above is the manual figure you entered."
-              : "No account is linked yet."}{" "}
-            Set money aside below to link one.
+              ? "Nothing is linked, so the amount above is the manual figure you entered."
+              : "Nothing is linked yet."}{" "}
+            Set money aside, or take a share of a holding, below.
           </p>
         ) : (
           <ul className="divide-y divide-border overflow-hidden rounded-2xl border border-border bg-surface">
-            {view.allocations.map((a) => (
-              <li key={a.accountId} className="flex items-start justify-between gap-3 px-4 py-3">
-                <span className="min-w-0">
-                  <span className="block truncate font-medium">
-                    {a.accountName}
-                    {a.accountArchived ? " (archived)" : ""}
-                  </span>
-                  <span className="block text-sm text-muted">
-                    Free: <Amount value={a.free} />
-                  </span>
-                  {a.over > 0 && (
-                    <span className="block text-sm text-negative">
-                      Over-allocated by <Amount value={a.over} />. Nothing was moved; you decide what to do.
+            {view.allocations.map((a) =>
+              a.kind === "cash" ? (
+                <li key={`cash-${a.accountId}`} className="flex items-start justify-between gap-3 px-4 py-3">
+                  <span className="min-w-0">
+                    <span className="block truncate font-medium">
+                      {a.accountName}
+                      {a.accountArchived ? " (archived)" : ""}
                     </span>
-                  )}
-                </span>
-                <Amount value={a.amount} className="shrink-0 font-medium" />
-              </li>
-            ))}
+                    <span className="block text-sm text-muted">
+                      Free: <Amount value={a.free} />
+                    </span>
+                    <span className="block text-sm text-muted">Assumed return: {a.rate === null ? "not set (counts as 0%)" : `${formatRate(a.rate)} a year`}</span>
+                    {a.over > 0 && (
+                      <span className="block text-sm text-negative">
+                        Over-allocated by <Amount value={a.over} />. Nothing was moved; you decide what to do.
+                      </span>
+                    )}
+                  </span>
+                  <Amount value={a.amount} className="shrink-0 font-medium" />
+                </li>
+              ) : (
+                <li key={`holding-${a.holdingId}`} className="flex items-start justify-between gap-3 px-4 py-3">
+                  <span className="min-w-0">
+                    <span className="block truncate font-medium">
+                      {a.name}
+                      {a.archived ? " (archived)" : ""}
+                    </span>
+                    <span className="block text-sm text-muted">
+                      {KIND_LABEL[a.holdingKind]} · {sharePercentText(a.percent)}% of a holding worth <Amount value={a.holdingValue} />
+                    </span>
+                    <span className="block text-sm text-muted">Free share: {sharePercentText(a.freeShare)}% not claimed by any goal</span>
+                    <span className="block text-sm text-muted">
+                      Assumed return: {a.rate === null ? "not set (counts as 0%)" : `${formatRate(a.rate)} a year`}
+                    </span>
+                  </span>
+                  <Amount value={a.value} className="shrink-0 font-medium" />
+                </li>
+              ),
+            )}
           </ul>
         )}
       </section>
@@ -128,6 +160,24 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
         <h2 className="mb-2 text-lg font-semibold tracking-tight">Add or change allocation</h2>
         <div className={`p-5 ${card}`}>
           <AllocationForm goalId={goal.id} accounts={choices} />
+        </div>
+      </section>
+
+      <section className="mt-8">
+        <h2 className="mb-2 text-lg font-semibold tracking-tight">Fund from a holding</h2>
+        <div className={`p-5 ${card}`}>
+          <HoldingShareForm
+            goalId={goal.id}
+            holdings={shareChoices.map((h) => ({
+              id: h.id,
+              name: h.name,
+              kind: h.kind,
+              archived: h.archived,
+              value: h.value,
+              current: h.current,
+              freeShare: h.freeShare,
+            }))}
+          />
         </div>
       </section>
 
@@ -151,7 +201,7 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
       <section className="mt-8">
         <h2 className="mb-2 text-lg font-semibold tracking-tight">Recent changes</h2>
         {history.length === 0 ? (
-          <p className="text-muted">No money has been set aside for this goal yet.</p>
+          <p className="text-muted">Nothing has been set aside for this goal yet.</p>
         ) : (
           <ul className="divide-y divide-border overflow-hidden rounded-2xl border border-border bg-surface">
             {history.map((e) => (
@@ -159,7 +209,10 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
                 <span className="min-w-0">
                   <span className="block font-medium">{e.delta > 0 ? "Set aside" : "Released"}</span>
                   <span className="block truncate text-sm text-muted">
-                    {formatDay(e.date)} · {accountName.get(e.accountId) ?? "Unknown account"}
+                    {formatDay(e.date)} ·{" "}
+                    {e.holdingId
+                      ? `${e.percentDelta ? `${sharePercentText(e.percentDelta.replace("-", ""))}% of ` : ""}${holdingName.get(e.holdingId) ?? "Unknown holding"}`
+                      : (accountName.get(e.accountId!) ?? "Unknown account")}
                   </span>
                 </span>
                 <span className={`shrink-0 font-medium ${e.delta > 0 ? "text-positive" : "text-muted"}`}>

@@ -122,13 +122,13 @@ function step(state: HoldingState, e: HoldingEvent): HoldingState {
       return { ...state, ...next, invested: state.invested + purchaseCash(e.quantity, e.price, e.fee) };
     }
     case "sale": {
-      checkMoney(e.tax, "tax");
       const sale = applySale(state, e.quantity, e.price, e.fee);
+      const proceeds = saleCash(e.quantity, e.price, e.fee, e.tax); // same rule as the ledger row: net must be positive
       return {
         ...state,
         ...sale.remaining,
-        realizedPL: state.realizedPL + sale.realizedPL - e.tax,
-        saleProceeds: state.saleProceeds + sale.netProceeds - e.tax,
+        realizedPL: state.realizedPL + proceeds - sale.costOfSharesSold,
+        saleProceeds: state.saleProceeds + proceeds,
       };
     }
     case "dividend":
@@ -137,8 +137,13 @@ function step(state: HoldingState, e: HoldingEvent): HoldingState {
       checkQuantity(e.quantity);
       return { ...state, quantity: fromScaled(toScaled(state.quantity, "quantity") + toScaled(e.quantity, "quantity")) };
     }
-    case "split":
-      return { ...state, quantity: splitQuantity(state.quantity, e.ratio) };
+    case "split": {
+      const quantity = splitQuantity(state.quantity, e.ratio);
+      if (quantity === "0" && state.costBasis > 0) {
+        throw new RangeError("This reverse split would leave no shares but cost basis remains; record a write-off instead");
+      }
+      return { ...state, quantity };
+    }
     case "writeOff":
       return { ...state, quantity: "0", costBasis: 0, realizedPL: state.realizedPL - state.costBasis };
   }
@@ -232,7 +237,11 @@ export function staleness(
   return { days, stale: days > staleDays };
 }
 
-export type PortfolioHolding = { id: string; events: HoldingEvent[]; priceUpdates: PriceUpdate[] };
+/**
+ * A unit-based holding or physical gold (grams are the quantity; gold passes its karat's prices from gold.ts and its
+ * own `staleDays`). Value-based clouds have no quantity and never go through here: see `CloudLine`.
+ */
+export type PortfolioHolding = { id: string; events: HoldingEvent[]; priceUpdates: PriceUpdate[]; staleDays?: number };
 
 export type PortfolioLine = HoldingValue &
   Position & {
@@ -241,22 +250,27 @@ export type PortfolioLine = HoldingValue &
     stale: boolean;
   };
 
+/** A Savings Cloud already valued by clouds.ts. */
+export type CloudLine = { id: string; value: Piasters; stale: boolean };
+
 /**
- * Value of every holding as of `date` (which also serves as "today" for staleness).
- * `stale` is true when any holding still held on that date is valued from a stale or missing price.
+ * Value of every holding as of `date` (which also serves as "today" for staleness), plus any cloud lines.
+ * `stale` is true when any holding still held on that date is valued from a stale or missing price, or a cloud is stale.
  */
 export function portfolioValue(
   holdings: PortfolioHolding[],
   date: string,
   staleDays: number = DEFAULT_STALE_DAYS,
+  clouds: CloudLine[] = [],
 ): { total: Piasters; stale: boolean; lines: PortfolioLine[] } {
   const lines = holdings.map((h): PortfolioLine => {
     const { quantity, costBasis } = replayHolding(h.events, date);
     const position = { quantity, costBasis };
     const v = holdingValue(position, h.priceUpdates, lastTransactionPrice(h.events, date), date);
     const held = quantity !== "0";
-    const s = staleness(v.priceDate, date, staleDays);
+    const s = staleness(v.priceDate, date, h.staleDays ?? staleDays);
     return { id: h.id, ...position, ...v, days: s.days, stale: held && s.stale };
   });
-  return { total: lines.reduce((sum, l) => sum + l.value, 0), stale: lines.some((l) => l.stale), lines };
+  const total = lines.reduce((sum, l) => sum + l.value, 0) + clouds.reduce((sum, c) => sum + c.value, 0);
+  return { total, stale: lines.some((l) => l.stale) || clouds.some((c) => c.stale), lines };
 }

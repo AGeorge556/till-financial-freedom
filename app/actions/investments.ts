@@ -3,9 +3,10 @@
 import { and, eq, ne } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { db } from "@/db";
-import { listHoldingEvents } from "@/db/queries";
+import { listCloudRecords, listHoldingEvents } from "@/db/queries";
 import { accounts, corporateActionKind, corporateActions, holdings, priceUpdates, transactions } from "@/db/schema";
 import { requireUserId } from "@/lib/auth";
+import { validateCloudHistory } from "@/lib/finance-core/clouds";
 import { lineValue } from "@/lib/finance-core/holdings";
 import { parseEGP, type Piasters } from "@/lib/finance-core/money";
 import { dividendCash, type HoldingEvent, purchaseCash, saleCash, validateHistory } from "@/lib/finance-core/portfolio";
@@ -14,6 +15,8 @@ import { type ActionState, id, isRealDate, str } from "./shared";
 
 const NOT_FOUND = "Holding not found.";
 const ARCHIVED = "This holding is archived. Restore it first.";
+const CLOUD = "A Savings Cloud takes deposits and withdrawals, not units. Use its own actions.";
+const GOLD = "Gold has no dividends and is priced from the gold prices, not per holding.";
 const ACCOUNT_ERROR = "Account not found.";
 const MONEY_ERROR = "Enter an amount like 1,250.50 (up to 2 decimals, no minus sign).";
 const QUANTITY_ERROR = "Enter a quantity above zero with up to 6 decimals, like 25 or 12.5.";
@@ -56,12 +59,14 @@ function engineError(e: unknown): ActionState {
 
 /**
  * Runs `work` in one database transaction that holds this holding's row lock, so two writes to the same
- * holding take turns and each one validates against the history the other left behind.
+ * holding take turns and each one validates against the history the other left behind. These actions are
+ * unit-based (gold's unit is the gram); a cloud is refused unless the caller says it handles clouds.
  */
 async function mutate(
   userId: string,
   holdingId: string | null,
   work: (tx: Tx, holding: Holding) => Promise<void>,
+  allowCloud = false,
 ): Promise<ActionState> {
   if (!holdingId) return { error: NOT_FOUND };
   try {
@@ -73,6 +78,7 @@ async function mutate(
         .for("update");
       if (!holding) return refuse(NOT_FOUND);
       if (holding.archivedAt) return refuse(ARCHIVED);
+      if (holding.kind === "cloud" && !allowCloud) return refuse(CLOUD);
       await work(tx, holding);
     });
   } catch (e) {
@@ -228,6 +234,7 @@ export async function recordDividend(_prev: ActionState, formData: FormData): Pr
   }
 
   return mutate(userId, id(formData, "holdingId"), async (tx, holding) => {
+    if (holding.kind === "gold") refuse(GOLD);
     const accountId = await requireAccount(tx, userId, common.accountId);
     const createdAt = new Date();
     await assertHistory(tx, userId, holding.id, {
@@ -297,11 +304,15 @@ export async function addPriceUpdate(_prev: ActionState, formData: FormData): Pr
   if (date > cairoToday()) return { error: "A price cannot be dated in the future." };
 
   return mutate(userId, id(formData, "holdingId"), async (tx, holding) => {
+    if (holding.kind === "gold") refuse(GOLD);
     await tx.insert(priceUpdates).values({ userId, holdingId: holding.id, date, price, createdAt: new Date() });
   });
 }
 
-/** Voids a buy, sell or dividend, refused if the position would go impossible on any date. */
+/**
+ * Voids a buy, sell, dividend, or a cloud deposit or withdrawal. Refused if the position would go impossible on any
+ * date, or (a cloud) if a withdrawal would end up larger than the estimated value.
+ */
 export async function voidInvestmentTransaction(_prev: ActionState, formData: FormData): Promise<ActionState> {
   const userId = await requireUserId();
   const txId = id(formData, "id");
@@ -321,6 +332,12 @@ export async function voidInvestmentTransaction(_prev: ActionState, formData: Fo
       .returning({ id: transactions.id });
     if (voided.length === 0) refuse("Transaction not found or already voided.");
     // Checked after the update so the replay already leaves this row out; a refusal rolls the update back.
-    await assertHistory(tx, userId, holding.id, undefined, "Voiding this would leave an impossible position");
-  });
+    if (holding.kind === "cloud") {
+      if (!validateCloudHistory(await listCloudRecords(userId, holding.id, tx)).ok) {
+        refuse("Voiding this would leave a withdrawal larger than the cloud's estimated value.");
+      }
+    } else {
+      await assertHistory(tx, userId, holding.id, undefined, "Voiding this would leave an impossible position");
+    }
+  }, true);
 }

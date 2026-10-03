@@ -1,16 +1,14 @@
 import Link from "next/link";
-import { accountValue, type HoldingView } from "@/app/(app)/investments/data";
+import type { HoldingView } from "@/app/(app)/investments/data";
 import { Amount } from "./Amount";
-import { plain, updatedText } from "./HoldingFormat";
+import { goldName, plain, updatedText } from "./HoldingFormat";
 import { HoldingPL } from "./HoldingPL";
 import { HoldingPrivate } from "./HoldingPrivate";
 
-export type HoldingGroup = { id: string; name: string; cash: number; holdings: number; views: HoldingView[] };
-
-function Status({ v }: { v: HoldingView }) {
+function Status({ v, gold }: { v: HoldingView; gold: boolean }) {
   return (
     <span className="text-sm text-muted">
-      {updatedText(v.source, v.days)}
+      {updatedText(v.source, v.days, gold)}
       {v.stale && (
         <span className="ml-2 rounded-full border border-negative px-2 py-0.5 text-xs font-medium text-negative">▲ Stale</span>
       )}
@@ -20,7 +18,8 @@ function Status({ v }: { v: HoldingView }) {
 
 const held = (v: HoldingView) => v.state.quantity !== "0";
 
-function Cards({ views }: { views: HoldingView[] }) {
+function Cards({ views, gold }: { views: HoldingView[]; gold: boolean }) {
+  const unit = gold ? "g" : "units";
   return (
     <ul className="divide-y divide-border overflow-hidden rounded-2xl border border-border bg-surface md:hidden">
       {views.map((v) => (
@@ -29,7 +28,11 @@ function Cards({ views }: { views: HoldingView[] }) {
             <span className="flex items-baseline justify-between gap-3">
               <span className="min-w-0 truncate font-medium">
                 {v.row.name}
-                {v.row.ticker && <span className="font-normal text-muted"> · {v.row.ticker}</span>}
+                {gold ? (
+                  <span className="font-normal text-muted"> · {goldName(v.row.karat, v.row.form)}</span>
+                ) : (
+                  v.row.ticker && <span className="font-normal text-muted"> · {v.row.ticker}</span>
+                )}
               </span>
               <Amount value={v.value} className="shrink-0 font-medium" />
             </span>
@@ -37,17 +40,17 @@ function Cards({ views }: { views: HoldingView[] }) {
               <span>
                 {held(v) ? (
                   <>
-                    <HoldingPrivate>{plain(v.state.quantity)}</HoldingPrivate> units, average cost{" "}
+                    <HoldingPrivate>{plain(v.state.quantity)}</HoldingPrivate> {unit}, average cost{" "}
                     <Amount value={v.state.averageCost} showPiasters />
                   </>
                 ) : (
-                  "No units held"
+                  gold ? "No gold held" : "No units held"
                 )}
               </span>
               <HoldingPL value={v.unrealized} className="shrink-0" />
             </span>
             <span className="mt-1 block">
-              <Status v={v} />
+              <Status v={v} gold={gold} />
             </span>
           </Link>
         </li>
@@ -58,21 +61,21 @@ function Cards({ views }: { views: HoldingView[] }) {
 
 const th = "px-4 py-3 font-medium";
 
-function Table({ name, views }: { name: string; views: HoldingView[] }) {
+function Table({ name, views, gold }: { name: string; views: HoldingView[]; gold: boolean }) {
   return (
     <div className="hidden overflow-x-auto rounded-2xl border border-border bg-surface md:block">
       <table className="w-full text-sm">
-        <caption className="sr-only">Holdings in {name}</caption>
+        <caption className="sr-only">{name}</caption>
         <thead className="text-left text-muted">
           <tr>
             <th scope="col" className={th}>
               Holding
             </th>
             <th scope="col" className={`${th} text-right`}>
-              Units
+              {gold ? "Grams" : "Units"}
             </th>
             <th scope="col" className={`${th} text-right`}>
-              Average cost
+              {gold ? "Average cost per gram" : "Average cost"}
             </th>
             <th scope="col" className={`${th} text-right`}>
               Value
@@ -81,7 +84,7 @@ function Table({ name, views }: { name: string; views: HoldingView[] }) {
               Profit or loss
             </th>
             <th scope="col" className={th}>
-              Price
+              {gold ? "Gold price" : "Price"}
             </th>
           </tr>
         </thead>
@@ -91,7 +94,11 @@ function Table({ name, views }: { name: string; views: HoldingView[] }) {
               <td className="px-4 py-1">
                 <Link href={`/investments/${v.row.id}`} className="inline-flex min-h-11 items-center font-medium underline-offset-2 hover:underline">
                   {v.row.name}
-                  {v.row.ticker && <span className="ml-1 font-normal text-muted">· {v.row.ticker}</span>}
+                  {gold ? (
+                    <span className="ml-1 font-normal text-muted">· {goldName(v.row.karat, v.row.form)}</span>
+                  ) : (
+                    v.row.ticker && <span className="ml-1 font-normal text-muted">· {v.row.ticker}</span>
+                  )}
                 </Link>
               </td>
               <td className="px-4 py-1 text-right tabular-nums">
@@ -105,7 +112,7 @@ function Table({ name, views }: { name: string; views: HoldingView[] }) {
                 <HoldingPL value={v.unrealized} />
               </td>
               <td className="px-4 py-1">
-                <Status v={v} />
+                <Status v={v} gold={gold} />
               </td>
             </tr>
           ))}
@@ -115,23 +122,12 @@ function Table({ name, views }: { name: string; views: HoldingView[] }) {
   );
 }
 
-/** Holdings grouped by brokerage account: a card list on a phone, a table from 768px. */
-export function HoldingList({ groups }: { groups: HoldingGroup[] }) {
+/** Stocks and funds, or gold: a card list on a phone, a table from 768px. */
+export function HoldingList({ name, views, gold = false }: { name: string; views: HoldingView[]; gold?: boolean }) {
   return (
     <>
-      {groups.map((g) => (
-        <section key={g.id} className="mt-8">
-          <div className="flex items-baseline justify-between gap-3">
-            <h2 className="text-lg font-semibold tracking-tight">{g.name}</h2>
-            <Amount value={accountValue(g.cash, g.holdings)} className="font-medium" />
-          </div>
-          <p className="mt-0.5 mb-2 text-sm text-muted">
-            Cash <Amount value={g.cash} /> + holdings <Amount value={g.holdings} />
-          </p>
-          <Cards views={g.views} />
-          <Table name={g.name} views={g.views} />
-        </section>
-      ))}
+      <Cards views={views} gold={gold} />
+      <Table name={name} views={views} gold={gold} />
     </>
   );
 }
