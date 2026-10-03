@@ -2,7 +2,7 @@
 
 Personal wealth, savings, investment and goal tracker. EGP only, single user, installable on the iPhone home screen (PWA).
 
-Status: Phase 1 complete. The calculation engine, ledger schema, five-tab shell and email-code sign-in exist; every page except `/login` requires a session (`proxy.ts`). There is no data entry yet.
+Status: Phase 1 complete. The calculation engine, ledger schema, five-tab shell and email + password sign-in exist; every page except `/login` requires a session (`proxy.ts`). There is no data entry yet.
 
 ## Layout
 
