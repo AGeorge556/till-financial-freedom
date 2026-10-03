@@ -62,6 +62,8 @@ export const transactionType = pgEnum("transaction_type", [
   "ADJUSTMENT",
 ]);
 export const transactionStatus = pgEnum("transaction_status", ["pending", "posted", "void"]);
+export const holdingKind = pgEnum("holding_kind", ["stock", "fund", "other"]);
+export const corporateActionKind = pgEnum("corporate_action_kind", ["BONUS", "SPLIT", "WRITE_OFF"]);
 export const savingsTargetMode = pgEnum("savings_target_mode", ["fixed", "percentage", "flexible"]);
 export const allocationRuleKind = pgEnum("allocation_rule_kind", ["fixed", "percentage", "remainder"]);
 export const allocationTargetKind = pgEnum("allocation_target_kind", ["goal", "investments", "cash"]);
@@ -76,11 +78,13 @@ export const userSettings = pgTable(
     savingsTargetPercent: numeric("savings_target_percent", { precision: 8, scale: 6 }),
     expectedMonthlyIncome: piasters("expected_monthly_income"),
     expectedMonthlySpending: piasters("expected_monthly_spending"),
+    staleDaysHoldings: integer("stale_days_holdings").notNull().default(7),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
   () => [
     check("user_settings_month_start_day_range", sql`month_start_day between 1 and 28`),
+    check("user_settings_stale_days_holdings_range", sql`stale_days_holdings between 1 and 365`),
     ownerOnly("user_settings"),
   ],
 ).enableRLS();
@@ -117,6 +121,29 @@ export const categories = pgTable(
   (t) => [unique("categories_user_kind_name_unique").on(t.userId, t.kind, t.name), ownerOnly("categories")],
 ).enableRLS();
 
+// Quantities and unit prices are NUMERIC(20,6) and travel as decimal strings (lib/finance-core/holdings.ts).
+const decimal6 = (name: string) => numeric(name, { precision: 20, scale: 6 });
+
+// Unit-based holdings (stock, fund, other). Quantity, cost basis and P/L are replayed from events, never stored.
+export const holdings = pgTable(
+  "holdings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: userId(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id),
+    kind: holdingKind("kind").notNull(),
+    name: text("name").notNull(),
+    ticker: text("ticker"),
+    notes: text("notes"),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  () => [ownerOnly("holdings")],
+).enableRLS();
+
 export const transactions = pgTable(
   "transactions",
   {
@@ -135,6 +162,9 @@ export const transactions = pgTable(
     grossAmount: piasters("gross_amount"),
     taxWithheld: piasters("tax_withheld"),
     realizedPl: piasters("realized_pl"),
+    holdingId: uuid("holding_id").references(() => holdings.id),
+    quantity: decimal6("quantity"),
+    unitPrice: decimal6("unit_price"),
     replacesId: uuid("replaces_id").references((): AnyPgColumn => transactions.id),
     voidedAt: timestamp("voided_at", { withTimezone: true }),
     createdAt: createdAt(),
@@ -156,10 +186,77 @@ export const transactions = pgTable(
       )`,
     ),
     check("transactions_fee_tax_non_negative_check", sql`${t.fee} >= 0 and coalesce(${t.taxWithheld}, 0) >= 0`),
+    check(
+      "transactions_holding_type_check",
+      sql`${t.holdingId} is null or ${t.type} in ('INVESTMENT_PURCHASE', 'INVESTMENT_SALE', 'DIVIDEND')`,
+    ),
+    check(
+      "transactions_quantity_price_check",
+      sql`(
+        ${t.type} in ('INVESTMENT_PURCHASE', 'INVESTMENT_SALE') and ${t.holdingId} is not null
+          and ${t.quantity} is not null and ${t.quantity} > 0
+          and ${t.unitPrice} is not null and ${t.unitPrice} >= 0
+      ) or (
+        (${t.type} not in ('INVESTMENT_PURCHASE', 'INVESTMENT_SALE') or ${t.holdingId} is null)
+          and ${t.quantity} is null and ${t.unitPrice} is null
+      )`,
+    ),
     index("transactions_user_date_idx").on(t.userId, t.date),
     index("transactions_from_account_idx").on(t.fromAccountId),
     index("transactions_to_account_idx").on(t.toAccountId),
     ownerOnly("transactions"),
+  ],
+).enableRLS();
+
+// Append-only: a price is never edited, a newer row supersedes it (step function by date).
+export const priceUpdates = pgTable(
+  "price_updates",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: userId(),
+    holdingId: uuid("holding_id")
+      .notNull()
+      .references(() => holdings.id, { onDelete: "cascade" }),
+    date: date("date", { mode: "string" }).notNull(),
+    price: decimal6("price").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    check("price_updates_price_check", sql`${t.price} >= 0`),
+    index("price_updates_holding_date_idx").on(t.holdingId, t.date),
+    ownerOnly("price_updates"),
+  ],
+).enableRLS();
+
+// Append-only, no cash. BONUS adds quantity, SPLIT multiplies it by ratio, WRITE_OFF zeroes quantity and cost basis.
+export const corporateActions = pgTable(
+  "corporate_actions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: userId(),
+    holdingId: uuid("holding_id")
+      .notNull()
+      .references(() => holdings.id, { onDelete: "cascade" }),
+    kind: corporateActionKind("kind").notNull(),
+    date: date("date", { mode: "string" }).notNull(),
+    quantity: decimal6("quantity"),
+    ratio: decimal6("ratio"),
+    note: text("note"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    check(
+      "corporate_actions_kind_values_check",
+      sql`(
+        ${t.kind} = 'BONUS' and ${t.quantity} is not null and ${t.quantity} > 0 and ${t.ratio} is null
+      ) or (
+        ${t.kind} = 'SPLIT' and ${t.ratio} is not null and ${t.ratio} > 0 and ${t.quantity} is null
+      ) or (
+        ${t.kind} = 'WRITE_OFF' and ${t.quantity} is null and ${t.ratio} is null
+      )`,
+    ),
+    index("corporate_actions_holding_date_idx").on(t.holdingId, t.date),
+    ownerOnly("corporate_actions"),
   ],
 ).enableRLS();
 

@@ -2,33 +2,45 @@
 
 import Link from "next/link";
 import { useState } from "react";
+import { type HoldingOption, PriceForm, TradeForm } from "./HoldingForms";
 import { Sheet } from "./Sheet";
 import { type AccountOption, type CategoryOption, type Kind, TransactionForm } from "./TransactionForm";
 
-const TABS: { kind: Kind; label: string }[] = [
-  { kind: "EXPENSE", label: "Expense" },
-  { kind: "INCOME", label: "Income" },
-  { kind: "TRANSFER", label: "Transfer" },
+type Tab = Kind | "INVESTMENT" | "PRICE";
+
+const TABS: { tab: Tab; label: string; investing?: boolean }[] = [
+  { tab: "EXPENSE", label: "Expense" },
+  { tab: "INCOME", label: "Income" },
+  { tab: "TRANSFER", label: "Transfer" },
+  { tab: "INVESTMENT", label: "Investment", investing: true },
+  { tab: "PRICE", label: "Price update", investing: true },
 ];
 
-/** Floating + button and the sheet it opens. Accounts and categories come from the layout (active ones only). */
+/**
+ * Floating + button and the sheet it opens. Accounts and categories come from the layout (active ones only).
+ * The investing tabs appear only when the layout passes `holdings` (active holdings, possibly none).
+ */
 export function QuickAdd({
   accounts,
   categories,
+  holdings,
   today,
 }: {
   accounts: AccountOption[];
   categories: CategoryOption[];
+  holdings?: HoldingOption[];
   today: string;
 }) {
   const [open, setOpen] = useState(false);
-  const [kind, setKind] = useState<Kind>("EXPENSE");
+  const [tab, setTab] = useState<Tab>("EXPENSE");
+  const [side, setSide] = useState<"buy" | "sell">("buy");
   const close = () => setOpen(false);
+  const tabs = TABS.filter((t) => !t.investing || holdings !== undefined);
 
   const missing =
     accounts.length === 0
       ? "You need an account before you can record anything."
-      : kind === "TRANSFER" && accounts.length < 2
+      : tab === "TRANSFER" && accounts.length < 2
         ? "A transfer needs two accounts."
         : null;
 
@@ -37,7 +49,7 @@ export function QuickAdd({
       <button
         type="button"
         onClick={() => {
-          setKind("EXPENSE");
+          setTab("EXPENSE");
           setOpen(true);
         }}
         aria-label="Add transaction"
@@ -57,15 +69,15 @@ export function QuickAdd({
       </button>
 
       <Sheet open={open} onClose={close} label="Add transaction">
-        <div className="mr-11 flex gap-1 rounded-xl bg-background p-1">
-          {TABS.map((t) => (
+        <div className="mr-11 grid grid-cols-6 gap-1 rounded-xl bg-background p-1">
+          {tabs.map((t) => (
             <button
-              key={t.kind}
+              key={t.tab}
               type="button"
-              aria-pressed={kind === t.kind}
-              onClick={() => setKind(t.kind)}
-              className={`min-h-11 flex-1 rounded-lg px-2 text-sm font-medium ${
-                kind === t.kind ? "bg-surface shadow-sm" : "text-muted"
+              aria-pressed={tab === t.tab}
+              onClick={() => setTab(t.tab)}
+              className={`min-h-11 rounded-lg px-2 text-sm font-medium ${t.investing ? "col-span-3" : "col-span-2"} ${
+                tab === t.tab ? "bg-surface shadow-sm" : "text-muted"
               }`}
             >
               {t.label}
@@ -82,10 +94,39 @@ export function QuickAdd({
               </Link>
               .
             </p>
+          ) : tab === "INVESTMENT" || tab === "PRICE" ? (
+            !holdings || holdings.length === 0 ? (
+              <p className="text-muted">
+                You have no holdings yet.{" "}
+                <Link href="/investments" onClick={close} className="underline">
+                  Add one in Investments
+                </Link>
+                .
+              </p>
+            ) : tab === "PRICE" ? (
+              <PriceForm holdings={holdings} today={today} autoFocus onDone={close} />
+            ) : (
+              <>
+                <div className="mb-5 flex gap-1 rounded-xl bg-background p-1">
+                  {(["buy", "sell"] as const).map((s) => (
+                    <button
+                      key={s}
+                      type="button"
+                      aria-pressed={side === s}
+                      onClick={() => setSide(s)}
+                      className={`min-h-11 flex-1 rounded-lg px-2 text-sm font-medium ${side === s ? "bg-surface shadow-sm" : "text-muted"}`}
+                    >
+                      {s === "buy" ? "Buy" : "Sell"}
+                    </button>
+                  ))}
+                </div>
+                <TradeForm key={side} side={side} holdings={holdings} accounts={accounts} today={today} autoFocus onDone={close} />
+              </>
+            )
           ) : (
             <TransactionForm
-              key={kind}
-              kind={kind}
+              key={tab}
+              kind={tab}
               accounts={accounts}
               categories={categories}
               today={today}

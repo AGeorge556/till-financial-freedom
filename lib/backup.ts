@@ -1,11 +1,12 @@
 import type { RuleKind, SavingsTargetMode, TargetKind } from "./finance-core/allocation";
 import type { TxType } from "./finance-core/ledger";
 import type { Piasters } from "./finance-core/money";
+import { DEFAULT_STALE_DAYS, type HoldingEvent, validateHistory } from "./finance-core/portfolio";
 
 // Pure: no React, Next.js or database imports. The enum lists below mirror db/schema.ts (backup.test.ts checks they match).
 
-export const BACKUP_VERSION = 2;
-// Version 1 files (no goals, rules or savings settings) still restore.
+export const BACKUP_VERSION = 3;
+// Version 1 files (no goals, rules or savings settings) and version 2 files (no holdings) still restore.
 const OLDEST_VERSION = 1;
 
 export const ACCOUNT_TYPES = ["bank", "cash", "wallet", "brokerage", "savings", "credit_card", "receivable", "other"] as const;
@@ -22,6 +23,8 @@ export const TX_TYPES = [
   "ADJUSTMENT",
 ] as const satisfies readonly TxType[];
 export const TX_STATUSES = ["pending", "posted", "void"] as const;
+export const HOLDING_KINDS = ["stock", "fund", "other"] as const;
+export const CORPORATE_ACTION_KINDS = ["BONUS", "SPLIT", "WRITE_OFF"] as const;
 export const SAVINGS_MODES = ["fixed", "percentage", "flexible"] as const satisfies readonly SavingsTargetMode[];
 export const RULE_KINDS = ["fixed", "percentage", "remainder"] as const satisfies readonly RuleKind[];
 export const TARGET_KINDS = ["goal", "investments", "cash"] as const satisfies readonly TargetKind[];
@@ -33,6 +36,8 @@ const RATE_LIMIT = 100;
 type AccountType = (typeof ACCOUNT_TYPES)[number];
 type CategoryKind = (typeof CATEGORY_KINDS)[number];
 type TxStatus = (typeof TX_STATUSES)[number];
+type HoldingKind = (typeof HOLDING_KINDS)[number];
+type CorporateActionKind = (typeof CORPORATE_ACTION_KINDS)[number];
 
 // Timestamps are ISO-8601 UTC strings; user_id is deliberately absent (restore stamps the current user).
 export type BackupAccount = {
@@ -71,9 +76,54 @@ export type BackupTransaction = {
   grossAmount: Piasters | null;
   taxWithheld: Piasters | null;
   realizedPl: Piasters | null;
+  holdingId: string | null;
+  /** Decimal string (NUMERIC(20,6)); set exactly on holding-linked purchases and sales. */
+  quantity: string | null;
+  unitPrice: string | null;
   replacesId: string | null;
   voidedAt: string | null;
   createdAt: string;
+};
+
+export type BackupHolding = {
+  id: string;
+  accountId: string;
+  kind: HoldingKind;
+  name: string;
+  ticker: string | null;
+  notes: string | null;
+  archivedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type BackupPriceUpdate = {
+  id: string;
+  holdingId: string;
+  date: string;
+  /** Decimal string, price per unit. */
+  price: string;
+  createdAt: string;
+};
+
+export type BackupCorporateAction = {
+  id: string;
+  holdingId: string;
+  kind: CorporateActionKind;
+  date: string;
+  quantity: string | null;
+  ratio: string | null;
+  note: string | null;
+  createdAt: string;
+};
+
+/** Expected returns the user typed; null until set. Decimals: 0.12 = 12%. */
+export type BackupAssumptions = {
+  stockReturn: number | null;
+  goldReturn: number | null;
+  savingsCloudApy: number | null;
+  cashReturn: number | null;
+  inflation: number | null;
 };
 
 export type BackupSettings = {
@@ -84,6 +134,7 @@ export type BackupSettings = {
   savingsTargetPercent: number | null;
   expectedMonthlyIncome: Piasters | null;
   expectedMonthlySpending: Piasters | null;
+  staleDaysHoldings: number;
 };
 
 export type BackupGoal = {
@@ -155,6 +206,10 @@ export type Backup = {
   goalAllocationEvents: BackupGoalAllocationEvent[];
   allocationRules: BackupAllocationRule[];
   allocationOverrides: BackupAllocationOverride[];
+  holdings: BackupHolding[];
+  priceUpdates: BackupPriceUpdate[];
+  corporateActions: BackupCorporateAction[];
+  assumptions: BackupAssumptions;
 };
 
 // Database rows carry Date timestamps, and numeric rates may arrive as strings from the driver.
@@ -169,6 +224,10 @@ type GoalAllocationRow = Dated<BackupGoalAllocation, "createdAt" | "updatedAt">;
 type GoalAllocationEventRow = Dated<BackupGoalAllocationEvent, "createdAt">;
 type AllocationRuleRow = Rated<Dated<BackupAllocationRule, "createdAt">, "percent">;
 type AllocationOverrideRow = Dated<BackupAllocationOverride, "createdAt">;
+type HoldingRow = Dated<BackupHolding, "archivedAt" | "createdAt" | "updatedAt">;
+type PriceUpdateRow = Dated<BackupPriceUpdate, "createdAt">;
+type CorporateActionRow = Dated<BackupCorporateAction, "createdAt">;
+type AssumptionsRow = { [K in keyof BackupAssumptions]: number | string | null };
 
 const iso = (d: Date) => d.toISOString();
 const isoOrNull = (d: Date | null) => (d ? d.toISOString() : null);
@@ -186,6 +245,10 @@ export function serializeBackup(
     goalAllocationEvents: GoalAllocationEventRow[];
     allocationRules: AllocationRuleRow[];
     allocationOverrides: AllocationOverrideRow[];
+    holdings: HoldingRow[];
+    priceUpdates: PriceUpdateRow[];
+    corporateActions: CorporateActionRow[];
+    assumptions: AssumptionsRow;
   },
   exportedAt: Date = new Date(),
 ): Backup {
@@ -199,6 +262,7 @@ export function serializeBackup(
       savingsTargetPercent: numOrNull(rows.settings.savingsTargetPercent),
       expectedMonthlyIncome: rows.settings.expectedMonthlyIncome,
       expectedMonthlySpending: rows.settings.expectedMonthlySpending,
+      staleDaysHoldings: rows.settings.staleDaysHoldings,
     },
     accounts: rows.accounts.map((a) => ({
       id: a.id,
@@ -234,6 +298,9 @@ export function serializeBackup(
       grossAmount: t.grossAmount,
       taxWithheld: t.taxWithheld,
       realizedPl: t.realizedPl,
+      holdingId: t.holdingId,
+      quantity: t.quantity,
+      unitPrice: t.unitPrice,
       replacesId: t.replacesId,
       voidedAt: isoOrNull(t.voidedAt),
       createdAt: iso(t.createdAt),
@@ -288,7 +355,88 @@ export function serializeBackup(
       amount: o.amount,
       createdAt: iso(o.createdAt),
     })),
+    holdings: rows.holdings.map((h) => ({
+      id: h.id,
+      accountId: h.accountId,
+      kind: h.kind,
+      name: h.name,
+      ticker: h.ticker,
+      notes: h.notes,
+      archivedAt: isoOrNull(h.archivedAt),
+      createdAt: iso(h.createdAt),
+      updatedAt: iso(h.updatedAt),
+    })),
+    priceUpdates: rows.priceUpdates.map((p) => ({
+      id: p.id,
+      holdingId: p.holdingId,
+      date: p.date,
+      price: p.price,
+      createdAt: iso(p.createdAt),
+    })),
+    corporateActions: rows.corporateActions.map((c) => ({
+      id: c.id,
+      holdingId: c.holdingId,
+      kind: c.kind,
+      date: c.date,
+      quantity: c.quantity,
+      ratio: c.ratio,
+      note: c.note,
+      createdAt: iso(c.createdAt),
+    })),
+    assumptions: {
+      stockReturn: numOrNull(rows.assumptions.stockReturn),
+      goldReturn: numOrNull(rows.assumptions.goldReturn),
+      savingsCloudApy: numOrNull(rows.assumptions.savingsCloudApy),
+      cashReturn: numOrNull(rows.assumptions.cashReturn),
+      inflation: numOrNull(rows.assumptions.inflation),
+    },
   };
+}
+
+type EventTx = Pick<
+  BackupTransaction,
+  "type" | "date" | "amount" | "status" | "fee" | "grossAmount" | "taxWithheld" | "holdingId" | "quantity" | "unitPrice"
+> & { createdAt: Date | string };
+type EventAction = Pick<BackupCorporateAction, "holdingId" | "kind" | "date" | "quantity" | "ratio"> & {
+  createdAt: Date | string;
+};
+export type LedgerEvent = HoldingEvent & { holdingId: string };
+
+/**
+ * Holding-linked ledger rows plus corporate actions as engine events. Pending and void rows are skipped
+ * (rule E). createdAt is normalised to ISO so the engine's text ordering is right for any input.
+ */
+export function toHoldingEvents(txs: EventTx[], actions: EventAction[]): LedgerEvent[] {
+  const events: LedgerEvent[] = [];
+  for (const t of txs) {
+    if (t.status !== "posted" || !t.holdingId) continue;
+    const at = { holdingId: t.holdingId, date: t.date, createdAt: new Date(t.createdAt).toISOString() };
+    const tax = t.taxWithheld ?? 0;
+    if (t.type === "INVESTMENT_PURCHASE") {
+      events.push({ ...at, type: "purchase", quantity: t.quantity!, price: t.unitPrice!, fee: t.fee });
+    } else if (t.type === "INVESTMENT_SALE") {
+      events.push({ ...at, type: "sale", quantity: t.quantity!, price: t.unitPrice!, fee: t.fee, tax });
+    } else if (t.type === "DIVIDEND") {
+      events.push({ ...at, type: "dividend", gross: t.grossAmount ?? t.amount + tax, tax });
+    }
+  }
+  for (const a of actions) {
+    const at = { holdingId: a.holdingId, date: a.date, createdAt: new Date(a.createdAt).toISOString() };
+    if (a.kind === "BONUS") events.push({ ...at, type: "bonus", quantity: a.quantity! });
+    else if (a.kind === "SPLIT") events.push({ ...at, type: "split", ratio: a.ratio! });
+    else events.push({ ...at, type: "writeOff" });
+  }
+  return events;
+}
+
+export function eventsByHolding(events: LedgerEvent[]): Map<string, HoldingEvent[]> {
+  const byHolding = new Map<string, HoldingEvent[]>();
+  for (const e of events) {
+    const list = byHolding.get(e.holdingId);
+    if (list) list.push(e);
+    else byHolding.set(e.holdingId, [e]);
+  }
+  return byHolding;
 }
 
 // ---- parsing ----
@@ -382,7 +530,20 @@ const orNull =
   (o: Obj, k: string, w: string): T | null =>
     o[k] === null ? null : read(o, k, w);
 
+// NUMERIC(20,6) as a string: 14 whole digits, up to 6 decimals, never negative, never exponent notation.
+const DECIMAL6 = /^\d{1,14}(\.\d{1,6})?$/;
+const isZeroDecimal = (d: string) => !/[1-9]/.test(d);
+
+function decimal(o: Obj, k: string, w: string): string {
+  const v = o[k];
+  if (typeof v !== "string" || !DECIMAL6.test(v)) {
+    bad(`${w}.${k}`, 'must be a decimal string such as "12.5" (at most 14 whole digits and 6 decimals, not negative)');
+  }
+  return v as string;
+}
+
 const textOrNull = orNull(text);
+const decimalOrNull = orNull(decimal);
 const wholeOrNull = orNull((o: Obj, k: string, w: string) => whole(o, k, w));
 const rateOrNull = orNull(rate);
 const uuidOrNull = orNull(uuid);
@@ -399,8 +560,9 @@ function unique(values: string[], where: string): void {
 // Same rules as transactions_accounts_by_type_check in db/schema.ts.
 const TO_ONLY: readonly TxType[] = ["INCOME", "DIVIDEND", "INTEREST", "INVESTMENT_SALE", "ADJUSTMENT"];
 const FROM_ONLY: readonly TxType[] = ["EXPENSE", "INVESTMENT_PURCHASE", "LIABILITY_PAYMENT"];
+const HOLDING_TYPES: readonly TxType[] = ["INVESTMENT_PURCHASE", "INVESTMENT_SALE", "DIVIDEND"];
 
-function parseTransaction(raw: unknown, i: number): BackupTransaction {
+function parseTransaction(raw: unknown, i: number, version: number): BackupTransaction {
   const w = `transactions[${i}]`;
   const o = entry(raw, w);
   const t: BackupTransaction = {
@@ -417,6 +579,9 @@ function parseTransaction(raw: unknown, i: number): BackupTransaction {
     grossAmount: wholeOrNull(o, "grossAmount", w),
     taxWithheld: wholeOrNull(o, "taxWithheld", w),
     realizedPl: wholeOrNull(o, "realizedPl", w),
+    holdingId: version < 3 ? null : uuidOrNull(o, "holdingId", w),
+    quantity: version < 3 ? null : decimalOrNull(o, "quantity", w),
+    unitPrice: version < 3 ? null : decimalOrNull(o, "unitPrice", w),
     replacesId: uuidOrNull(o, "replacesId", w),
     voidedAt: stampOrNull(o, "voidedAt", w),
     createdAt: stamp(o, "createdAt", w),
@@ -434,6 +599,19 @@ function parseTransaction(raw: unknown, i: number): BackupTransaction {
     if (!from || to) bad(w, `${t.type} needs fromAccountId and no toAccountId`);
   } else if (!from || !to || from === to) {
     bad(w, "TRANSFER needs two different accounts (fromAccountId and toAccountId)");
+  }
+
+  // Same rules as transactions_holding_type_check and transactions_quantity_price_check in db/schema.ts.
+  if (t.holdingId !== null && !HOLDING_TYPES.includes(t.type)) {
+    bad(`${w}.holdingId`, `only INVESTMENT_PURCHASE, INVESTMENT_SALE and DIVIDEND may belong to a holding, not ${t.type}`);
+  }
+  const trade = (t.type === "INVESTMENT_PURCHASE" || t.type === "INVESTMENT_SALE") && t.holdingId !== null;
+  if (trade) {
+    if (t.quantity === null || t.unitPrice === null || isZeroDecimal(t.quantity)) {
+      bad(w, `${t.type} on a holding needs a quantity above zero and a unitPrice`);
+    }
+  } else if (t.quantity !== null || t.unitPrice !== null) {
+    bad(w, "quantity and unitPrice are only allowed on a purchase or sale that belongs to a holding");
   }
   return t;
 }
@@ -475,7 +653,14 @@ function parseSettings(raw: unknown, version: number): BackupSettings {
       savingsTargetPercent: null,
       expectedMonthlyIncome: null,
       expectedMonthlySpending: null,
+      staleDaysHoldings: DEFAULT_STALE_DAYS,
     };
+  }
+  // Same rule as user_settings_stale_days_holdings_range in db/schema.ts.
+  const staleDaysHoldings =
+    version < 3 ? DEFAULT_STALE_DAYS : whole(o, "staleDaysHoldings", "settings", "a whole number of days from 1 to 365");
+  if (staleDaysHoldings < 1 || staleDaysHoldings > 365) {
+    bad("settings.staleDaysHoldings", "must be a whole number of days from 1 to 365");
   }
   return {
     monthStartDay,
@@ -484,7 +669,75 @@ function parseSettings(raw: unknown, version: number): BackupSettings {
     savingsTargetPercent: rateOrNull(o, "savingsTargetPercent", "settings"),
     expectedMonthlyIncome: wholeOrNull(o, "expectedMonthlyIncome", "settings"),
     expectedMonthlySpending: wholeOrNull(o, "expectedMonthlySpending", "settings"),
+    staleDaysHoldings,
   };
+}
+
+function parseAssumptions(raw: unknown, version: number): BackupAssumptions {
+  if (version < 3) return { stockReturn: null, goldReturn: null, savingsCloudApy: null, cashReturn: null, inflation: null };
+  const o = entry(raw, "assumptions");
+  return {
+    stockReturn: rateOrNull(o, "stockReturn", "assumptions"),
+    goldReturn: rateOrNull(o, "goldReturn", "assumptions"),
+    savingsCloudApy: rateOrNull(o, "savingsCloudApy", "assumptions"),
+    cashReturn: rateOrNull(o, "cashReturn", "assumptions"),
+    inflation: rateOrNull(o, "inflation", "assumptions"),
+  };
+}
+
+function parseHolding(raw: unknown, i: number): BackupHolding {
+  const w = `holdings[${i}]`;
+  const o = entry(raw, w);
+  return {
+    id: uuid(o, "id", w),
+    accountId: uuid(o, "accountId", w),
+    kind: oneOf(o, "kind", w, HOLDING_KINDS),
+    name: name(o, "name", w),
+    ticker: textOrNull(o, "ticker", w),
+    notes: textOrNull(o, "notes", w),
+    archivedAt: stampOrNull(o, "archivedAt", w),
+    createdAt: stamp(o, "createdAt", w),
+    updatedAt: stamp(o, "updatedAt", w),
+  };
+}
+
+// price_updates_price_check: decimal() already refuses a negative price.
+function parsePriceUpdate(raw: unknown, i: number): BackupPriceUpdate {
+  const w = `priceUpdates[${i}]`;
+  const o = entry(raw, w);
+  return {
+    id: uuid(o, "id", w),
+    holdingId: uuid(o, "holdingId", w),
+    date: day(o, "date", w),
+    price: decimal(o, "price", w),
+    createdAt: stamp(o, "createdAt", w),
+  };
+}
+
+// Same rule as corporate_actions_kind_values_check in db/schema.ts.
+function parseCorporateAction(raw: unknown, i: number): BackupCorporateAction {
+  const w = `corporateActions[${i}]`;
+  const o = entry(raw, w);
+  const c: BackupCorporateAction = {
+    id: uuid(o, "id", w),
+    holdingId: uuid(o, "holdingId", w),
+    kind: oneOf(o, "kind", w, CORPORATE_ACTION_KINDS),
+    date: day(o, "date", w),
+    quantity: decimalOrNull(o, "quantity", w),
+    ratio: decimalOrNull(o, "ratio", w),
+    note: textOrNull(o, "note", w),
+    createdAt: stamp(o, "createdAt", w),
+  };
+  if (c.kind === "BONUS" && !(c.quantity !== null && !isZeroDecimal(c.quantity) && c.ratio === null)) {
+    bad(w, "a BONUS needs a quantity above zero and no ratio");
+  }
+  if (c.kind === "SPLIT" && !(c.ratio !== null && !isZeroDecimal(c.ratio) && c.quantity === null)) {
+    bad(w, "a SPLIT needs a ratio above zero and no quantity");
+  }
+  if (c.kind === "WRITE_OFF" && (c.quantity !== null || c.ratio !== null)) {
+    bad(w, "a WRITE_OFF has neither a quantity nor a ratio");
+  }
+  return c;
 }
 
 // Same rules as the goals_*_check constraints in db/schema.ts.
@@ -589,15 +842,15 @@ function parseAllocationOverride(raw: unknown, i: number): BackupAllocationOverr
   return v;
 }
 
-/** A collection that version 1 files do not have: empty for them, required (a list) for version 2. */
-function listSince2(root: Obj, key: string, version: number): unknown[] {
-  return version < 2 ? [] : list(root, key);
+/** A collection that older files do not have: empty before `since`, required (a list) from then on. */
+function listSince(root: Obj, key: string, version: number, since: number): unknown[] {
+  return version < since ? [] : list(root, key);
 }
 
 function build(input: unknown): Backup {
   if (!isObj(input)) throw new BackupError("Not a Till backup: the file must contain a JSON object.");
   const version = input.version;
-  if (version !== OLDEST_VERSION && version !== BACKUP_VERSION) {
+  if (typeof version !== "number" || !Number.isInteger(version) || version < OLDEST_VERSION || version > BACKUP_VERSION) {
     bad("version", `${JSON.stringify(version)} is not supported (this app reads versions ${OLDEST_VERSION} to ${BACKUP_VERSION})`);
   }
   const exportedAt = stamp(input, "exportedAt", "backup");
@@ -636,7 +889,7 @@ function build(input: unknown): Backup {
   unique(categories.map((c) => c.id), "categories.id");
   unique(categories.map((c) => `${c.kind} ${c.name}`), "categories (kind and name)");
 
-  const transactions = list(input, "transactions").map(parseTransaction);
+  const transactions = list(input, "transactions").map((raw, i) => parseTransaction(raw, i, version));
   unique(transactions.map((t) => t.id), "transactions.id");
 
   const accountIds = new Set(accounts.map((a) => a.id));
@@ -651,11 +904,11 @@ function build(input: unknown): Backup {
   });
   if (!replaceDepths(transactions)) bad("transactions", "replacesId links form a loop");
 
-  const goals = listSince2(input, "goals", version).map(parseGoal);
-  const goalAllocations = listSince2(input, "goalAllocations", version).map(parseGoalAllocation);
-  const goalAllocationEvents = listSince2(input, "goalAllocationEvents", version).map(parseGoalAllocationEvent);
-  const allocationRules = listSince2(input, "allocationRules", version).map(parseRule);
-  const allocationOverrides = listSince2(input, "allocationOverrides", version).map(parseAllocationOverride);
+  const goals = listSince(input, "goals", version, 2).map(parseGoal);
+  const goalAllocations = listSince(input, "goalAllocations", version, 2).map(parseGoalAllocation);
+  const goalAllocationEvents = listSince(input, "goalAllocationEvents", version, 2).map(parseGoalAllocationEvent);
+  const allocationRules = listSince(input, "allocationRules", version, 2).map(parseRule);
+  const allocationOverrides = listSince(input, "allocationOverrides", version, 2).map(parseAllocationOverride);
   unique(goals.map((g) => g.id), "goals.id");
   unique(goalAllocations.map((a) => a.id), "goalAllocations.id");
   unique(goalAllocations.map((a) => `${a.goalId} ${a.accountId}`), "goalAllocations (goal and account)");
@@ -686,7 +939,31 @@ function build(input: unknown): Backup {
     if (!ruleIds.has(o.ruleId)) bad(`allocationOverrides[${i}].ruleId`, "refers to a rule that is not in the file");
   });
 
-  // A version 1 file becomes the current shape: its new collections are empty and its settings are the defaults.
+  const holdings = listSince(input, "holdings", version, 3).map(parseHolding);
+  const priceUpdates = listSince(input, "priceUpdates", version, 3).map(parsePriceUpdate);
+  const corporateActions = listSince(input, "corporateActions", version, 3).map(parseCorporateAction);
+  const assumptions = parseAssumptions(input.assumptions, version);
+  unique(holdings.map((h) => h.id), "holdings.id");
+  unique(priceUpdates.map((p) => p.id), "priceUpdates.id");
+  unique(corporateActions.map((c) => c.id), "corporateActions.id");
+
+  const holdingIds = new Set(holdings.map((h) => h.id));
+  const needHolding = (id: string | null, where: string) => {
+    if (id && !holdingIds.has(id)) bad(where, "refers to a holding that is not in the file");
+  };
+  holdings.forEach((h, i) => needAccount(h.accountId, `holdings[${i}].accountId`));
+  transactions.forEach((t, i) => needHolding(t.holdingId, `transactions[${i}].holdingId`));
+  priceUpdates.forEach((p, i) => needHolding(p.holdingId, `priceUpdates[${i}].holdingId`));
+  corporateActions.forEach((c, i) => needHolding(c.holdingId, `corporateActions[${i}].holdingId`));
+
+  // Rule F: a position that goes impossible on any date is refused before anything is written.
+  const events = eventsByHolding(toHoldingEvents(transactions, corporateActions));
+  holdings.forEach((h, i) => {
+    const check = validateHistory(events.get(h.id) ?? []);
+    if (!check.ok) bad(`holdings[${i}]`, `impossible position: ${check.error} (on ${check.date})`);
+  });
+
+  // An older file becomes the current shape: its new collections are empty and its new settings are the defaults.
   return {
     version: BACKUP_VERSION,
     exportedAt,
@@ -699,6 +976,10 @@ function build(input: unknown): Backup {
     goalAllocationEvents,
     allocationRules,
     allocationOverrides,
+    holdings,
+    priceUpdates,
+    corporateActions,
+    assumptions,
   };
 }
 

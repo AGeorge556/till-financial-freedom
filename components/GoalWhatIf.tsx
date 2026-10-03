@@ -3,10 +3,11 @@
 import { useId, useState, type ReactNode } from "react";
 import { futureValue, goalStatus, requiredMonthlyContribution } from "@/lib/finance-core/projection";
 import { parseEGP, type Piasters } from "@/lib/finance-core/money";
-import { financialMonth } from "@/lib/finance-core/time";
+import { financialMonth, monthsRemaining } from "@/lib/finance-core/time";
 import { Amount } from "./Amount";
 import { formatMonthYear } from "./dates";
 import { egpText, formatRate, monthsLateText, ratePercentText, shiftMonth } from "./GoalFormat";
+import { usePrivacy } from "./PrivacyProvider";
 import { field, secondaryBtn } from "./ui";
 
 export type WhatIfProps = {
@@ -36,6 +37,14 @@ function parseDelay(text: string): number | null {
   return /^\d{1,2}$/.test(text.trim()) && Number(text) <= MAX_DELAY ? Number(text) : null;
 }
 
+/** The target date moved by whole months; a day past the end of the new month (31 Jan + 1) lands on its last day. */
+function shiftDate(date: string, months: number): string {
+  const key = shiftMonth(date.slice(0, 7), months);
+  const [y, m] = key.split("-").map(Number);
+  const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  return `${key}-${String(Math.min(Number(date.slice(8, 10)), last)).padStart(2, "0")}`;
+}
+
 function Control({
   label,
   text,
@@ -43,6 +52,7 @@ function Control({
   invalid,
   range,
   inputMode,
+  masked,
 }: {
   label: string;
   text: string;
@@ -50,6 +60,8 @@ function Control({
   invalid: boolean;
   range: { min: number; max: number; step: number; value: number };
   inputMode: "decimal" | "numeric";
+  /** Privacy mode: no slider (its position would show the amount) and the typed figure is dotted out. */
+  masked?: boolean;
 }) {
   const id = useId();
   return (
@@ -58,18 +70,23 @@ function Control({
         {label}
       </label>
       <div className="flex items-center gap-3">
-        <input
-          type="range"
-          aria-label={`${label}, slider`}
-          min={range.min}
-          max={range.max}
-          step={range.step}
-          value={Math.min(range.max, Math.max(range.min, range.value))}
-          onChange={(e) => onText(e.target.value)}
-          className="h-11 min-w-0 flex-1 accent-goals"
-        />
+        {masked ? (
+          <p className="min-w-0 flex-1 text-sm text-muted">Amounts are hidden, so there is no slider. Type an amount.</p>
+        ) : (
+          <input
+            type="range"
+            aria-label={`${label}, slider`}
+            min={range.min}
+            max={range.max}
+            step={range.step}
+            value={Math.min(range.max, Math.max(range.min, range.value))}
+            onChange={(e) => onText(e.target.value)}
+            className="h-11 min-w-0 flex-1 accent-goals"
+          />
+        )}
         <input
           id={id}
+          type={masked ? "password" : "text"}
           inputMode={inputMode}
           autoComplete="off"
           value={text}
@@ -93,6 +110,7 @@ export function GoalWhatIf(p: WhatIfProps) {
   const [pmtText, setPmtText] = useState(egpText(p.plannedMonthly));
   const [returnText, setReturnText] = useState(ratePercentText(p.annualReturn));
   const [delayText, setDelayText] = useState("0");
+  const { hidden } = usePrivacy();
 
   const pmtParsed = parseEGP(pmtText);
   const returnParsed = parseReturn(returnText);
@@ -106,7 +124,11 @@ export function GoalWhatIf(p: WhatIfProps) {
   const firstOffset = p.contributedThisMonth ? 1 : 0;
 
   function run(monthly: Piasters, rate: number, extra: number) {
-    const n = p.monthsRemaining + extra;
+    // A delay moves the target date, so month-end days and a date already past give the engine's answer.
+    const n =
+      extra === 0
+        ? p.monthsRemaining
+        : monthsRemaining(p.today, shiftDate(p.targetDate, extra), p.startDay, p.contributedThisMonth);
     const status = goalStatus(p.target, p.current, monthly, rate, n);
     const req = requiredMonthlyContribution(p.target, p.current, rate, n);
     const months = status.monthsLate === null ? null : status.monthsLate + n;
@@ -127,7 +149,7 @@ export function GoalWhatIf(p: WhatIfProps) {
     r.req.kind === "target-date-passed" ? "Target date has passed" : r.req.monthly === 0 ? "Nothing more needed" : <Amount value={r.req.monthly} />;
   const lateness = (r: ReturnType<typeof run>) =>
     p.current >= p.target ? "Already reached" : r.n === 0 ? "Target date has passed" : monthsLateText(r.status.monthsLate);
-  const targetMonth = formatMonthYear(`${shiftMonth(p.targetDate.slice(0, 7), delay)}-01`);
+  const targetMonth = formatMonthYear(shiftDate(p.targetDate, delay));
 
   const rows: { label: string; base: ReactNode; alt: ReactNode }[] = [
     { label: "Projected value at the target date", base: <Amount value={base.status.projected} />, alt: <Amount value={alt.status.projected} /> },
@@ -182,6 +204,7 @@ export function GoalWhatIf(p: WhatIfProps) {
             text={pmtText}
             onText={setPmtText}
             invalid={pmtParsed === null}
+            masked={hidden}
             inputMode="decimal"
             range={{ min: 0, max: maxPmt, step: 100, value: pmtParsed === null ? 0 : Math.round(pmtParsed / 100) }}
           />

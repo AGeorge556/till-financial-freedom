@@ -1,13 +1,17 @@
 import { PrivacyProvider, PrivacyToggle } from "@/components/PrivacyProvider";
 import { QuickAdd } from "@/components/QuickAdd";
 import { TabBar } from "@/components/TabBar";
-import { listAccounts, listCategories } from "@/db/queries";
+import { listAccounts, listCategories, listHoldings } from "@/db/queries";
 import { requireUserId } from "@/lib/auth";
 import { cairoToday } from "@/lib/finance-core/time";
 
 export default async function AppLayout({ children }: LayoutProps<"/">) {
   const userId = await requireUserId();
-  const [accounts, categories] = await Promise.all([listAccounts(userId), listCategories(userId)]);
+  const [accounts, categories, holdings] = await Promise.all([
+    listAccounts(userId),
+    listCategories(userId),
+    listHoldings(userId),
+  ]);
 
   return (
     <PrivacyProvider>
@@ -27,6 +31,7 @@ export default async function AppLayout({ children }: LayoutProps<"/">) {
       <QuickAdd
         accounts={accounts.map((a) => ({ id: a.id, name: a.name, archived: false }))}
         categories={categories.map((c) => ({ id: c.id, name: c.name, kind: c.kind, archived: false }))}
+        holdings={holdings.map((h) => ({ id: h.id, name: h.name, ticker: h.ticker, accountId: h.accountId }))}
         today={cairoToday()}
       />
     </PrivacyProvider>

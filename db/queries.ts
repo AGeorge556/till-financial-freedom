@@ -1,18 +1,23 @@
 import "server-only";
-import { and, asc, desc, eq, gte, isNull, lte } from "drizzle-orm";
+import { and, asc, desc, eq, gte, isNotNull, isNull, lte } from "drizzle-orm";
 import type { SavingsTargetMode } from "@/lib/finance-core/allocation";
 import { accountBalance, type Tx } from "@/lib/finance-core/ledger";
 import type { Piasters } from "@/lib/finance-core/money";
+import { DEFAULT_STALE_DAYS, type HoldingEvent, type PriceUpdate } from "@/lib/finance-core/portfolio";
+import { eventsByHolding, type LedgerEvent, toHoldingEvents } from "@/lib/backup";
 import { db } from "./index";
 import {
   accounts,
   allocationOverrides,
   allocationRules,
   categories,
+  corporateActions,
   financialAssumptions,
   goalAllocationEvents,
   goalAllocations,
   goals,
+  holdings,
+  priceUpdates,
   transactions,
   userSettings,
 } from "./schema";
@@ -194,5 +199,136 @@ export async function getAssumptions(userId: string): Promise<Assumptions> {
     savingsCloudApy: rateOrNull(row?.savingsCloudApy ?? null),
     cashReturn: rateOrNull(row?.cashReturn ?? null),
     inflation: rateOrNull(row?.inflation ?? null),
+  };
+}
+
+// ---- Phase 4a: holdings ----
+
+// A database or a transaction handle: the history check inside an action must read through its own transaction.
+type Executor = Pick<typeof db, "select">;
+
+export type HoldingRow = typeof holdings.$inferSelect;
+export type CorporateActionRow = typeof corporateActions.$inferSelect;
+export type HoldingPriceUpdate = PriceUpdate & { id: string; holdingId: string };
+export type PortfolioHoldingRow = HoldingRow & { events: HoldingEvent[]; priceUpdates: PriceUpdate[] };
+export type PortfolioData = {
+  staleDays: number;
+  /** Archived holdings included; every row is also a valid `PortfolioHolding` for the engine. */
+  holdings: PortfolioHoldingRow[];
+  /** Posted buys, sells and dividends that belong to a holding, newest first. */
+  trades: TransactionRow[];
+  /** Newest first. */
+  corporateActions: CorporateActionRow[];
+};
+
+export function listHoldings(userId: string, options: { includeArchived?: boolean } = {}): Promise<HoldingRow[]> {
+  return db
+    .select()
+    .from(holdings)
+    .where(and(eq(holdings.userId, userId), options.includeArchived ? undefined : isNull(holdings.archivedAt)))
+    .orderBy(asc(holdings.name), asc(holdings.createdAt));
+}
+
+export async function getHolding(userId: string, holdingId: string): Promise<HoldingRow | undefined> {
+  const [row] = await db
+    .select()
+    .from(holdings)
+    .where(and(eq(holdings.userId, userId), eq(holdings.id, holdingId)));
+  return row;
+}
+
+const tradeRows = (userId: string, holdingId: string | undefined, executor: Executor) =>
+  executor
+    .select()
+    .from(transactions)
+    .where(
+      and(
+        eq(transactions.userId, userId),
+        eq(transactions.status, "posted"),
+        holdingId ? eq(transactions.holdingId, holdingId) : isNotNull(transactions.holdingId),
+      ),
+    )
+    .orderBy(desc(transactions.date), desc(transactions.createdAt));
+
+const actionRows = (userId: string, holdingId: string | undefined, executor: Executor) =>
+  executor
+    .select()
+    .from(corporateActions)
+    .where(and(eq(corporateActions.userId, userId), holdingId ? eq(corporateActions.holdingId, holdingId) : undefined))
+    .orderBy(desc(corporateActions.date), desc(corporateActions.createdAt));
+
+/**
+ * Engine events (posted ledger rows and corporate actions) of one holding, or of all of them. Unordered:
+ * the engine orders by (date, createdAt). Pass the transaction handle to read inside a transaction.
+ */
+export async function listHoldingEvents(userId: string, holdingId?: string, executor: Executor = db): Promise<LedgerEvent[]> {
+  const trades = await tradeRows(userId, holdingId, executor);
+  const actions = await actionRows(userId, holdingId, executor);
+  return toHoldingEvents(trades, actions);
+}
+
+const toPriceUpdate = (r: typeof priceUpdates.$inferSelect): HoldingPriceUpdate => ({
+  id: r.id,
+  holdingId: r.holdingId,
+  date: r.date,
+  price: r.price,
+  createdAt: r.createdAt.toISOString(),
+});
+
+/** Newest date first. All of the user's, or one holding's. */
+export async function listPriceUpdates(userId: string, holdingId?: string): Promise<HoldingPriceUpdate[]> {
+  const rows = await db
+    .select()
+    .from(priceUpdates)
+    .where(and(eq(priceUpdates.userId, userId), holdingId ? eq(priceUpdates.holdingId, holdingId) : undefined))
+    .orderBy(desc(priceUpdates.date), desc(priceUpdates.createdAt));
+  return rows.map(toPriceUpdate);
+}
+
+/** Every price update, oldest first: what the backup needs. */
+export function listPriceUpdateRows(userId: string) {
+  return db
+    .select()
+    .from(priceUpdates)
+    .where(eq(priceUpdates.userId, userId))
+    .orderBy(asc(priceUpdates.date), asc(priceUpdates.createdAt));
+}
+
+/** Every corporate action, oldest first: what the backup needs. */
+export function listCorporateActions(userId: string) {
+  return db
+    .select()
+    .from(corporateActions)
+    .where(eq(corporateActions.userId, userId))
+    .orderBy(asc(corporateActions.date), asc(corporateActions.createdAt));
+}
+
+export async function getStaleDays(userId: string): Promise<number> {
+  const [row] = await db
+    .select({ days: userSettings.staleDaysHoldings })
+    .from(userSettings)
+    .where(eq(userSettings.userId, userId));
+  return row?.days ?? DEFAULT_STALE_DAYS;
+}
+
+/** Everything the investment pages need in five queries, however many holdings there are. */
+export async function loadPortfolio(userId: string): Promise<PortfolioData> {
+  const [holdingRows, trades, actions, prices, staleDays] = await Promise.all([
+    listHoldings(userId, { includeArchived: true }),
+    tradeRows(userId, undefined, db),
+    actionRows(userId, undefined, db),
+    listPriceUpdates(userId),
+    getStaleDays(userId),
+  ]);
+  const events = eventsByHolding(toHoldingEvents(trades, actions));
+  const pricesBy = new Map<string, PriceUpdate[]>();
+  for (const { holdingId, date, price, createdAt } of prices) {
+    pricesBy.set(holdingId, [...(pricesBy.get(holdingId) ?? []), { date, price, createdAt }]);
+  }
+  return {
+    staleDays,
+    holdings: holdingRows.map((h) => ({ ...h, events: events.get(h.id) ?? [], priceUpdates: pricesBy.get(h.id) ?? [] })),
+    trades,
+    corporateActions: actions,
   };
 }
