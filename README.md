@@ -1,0 +1,27 @@
+# Till Financial Freedom
+
+Personal wealth, savings, investment and goal tracker. EGP only, single user, installable on the iPhone home screen (PWA).
+
+Status: Phase 1a. The calculation engine, ledger schema and empty five-tab shell exist. There is no sign-in and no data entry yet, and the migrations have not been applied to a database.
+
+## Layout
+
+- `lib/finance-core/` - pure TypeScript calculation engine (no React, Next.js or database imports) and its tests.
+- `db/schema.ts`, `db/migrations/` - Drizzle schema and generated SQL. See `docs/schema-phase-1.md`.
+- `app/`, `components/` - Next.js App Router shell.
+
+## Commands
+
+```bash
+npm run dev          # local app on http://localhost:3000
+npm test             # engine tests (Vitest)
+npm run typecheck
+npm run build
+npm run db:generate  # generate a migration from db/schema.ts
+npm run db:migrate   # apply migrations (needs DIRECT_URL or DATABASE_URL)
+npm run db:seed      # starter data (needs DATABASE_URL and SEED_USER_ID)
+```
+
+## Environment
+
+Copy `.env.example` to `.env.local` and fill in the Supabase values. Never commit real values.

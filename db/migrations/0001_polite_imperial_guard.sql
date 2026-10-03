@@ -1,0 +1,1 @@
+ALTER TABLE "transactions" ADD CONSTRAINT "transactions_fee_tax_non_negative_check" CHECK ("transactions"."fee" >= 0 and coalesce("transactions"."tax_withheld", 0) >= 0);

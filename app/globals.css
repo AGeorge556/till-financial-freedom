@@ -1,0 +1,65 @@
+@import "tailwindcss";
+
+:root {
+  --background: #f7f5f0;
+  --surface: #ffffff;
+  --foreground: #1a1816;
+  --muted: #625d57;
+  --border: #e3dfd6;
+  --cash: #0e7490;
+  --investments: #4f46e5;
+  --spending: #b45309;
+  --goals: #a21caf;
+  --positive: #15803d;
+  --negative: #b91c1c;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0f0e12;
+    --surface: #1a181f;
+    --foreground: #f2efe9;
+    --muted: #a6a1ad;
+    --border: #2e2b35;
+    --cash: #22d3ee;
+    --investments: #818cf8;
+    --spending: #fb923c;
+    --goals: #e879f9;
+    --positive: #4ade80;
+    --negative: #f87171;
+    color-scheme: dark;
+  }
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-border: var(--border);
+  --color-cash: var(--cash);
+  --color-investments: var(--investments);
+  --color-spending: var(--spending);
+  --color-goals: var(--goals);
+  --color-positive: var(--positive);
+  --color-negative: var(--negative);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  -webkit-tap-highlight-color: transparent;
+}
+
+:focus-visible {
+  outline: 2px solid var(--foreground);
+  outline-offset: 2px;
+}
+
+/* Set pre-paint by the inline script in app/layout.tsx; cleared once PrivacyProvider hydrates. */
+html[data-privacy-boot] [data-amount] {
+  visibility: hidden;
+}
