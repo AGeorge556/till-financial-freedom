@@ -4,8 +4,12 @@ import {
   allocationRuleKind,
   allocationTargetKind,
   categoryKind,
+  contributionFrequency,
   corporateActionKind,
+  goldForm,
+  goldPriceMode,
   holdingKind,
+  liabilityKind,
   savingsTargetMode,
   transactionStatus,
   transactionType,
@@ -14,10 +18,14 @@ import {
   ACCOUNT_TYPES,
   BACKUP_VERSION,
   CATEGORY_KINDS,
+  CONTRIBUTION_FREQUENCIES,
   CORPORATE_ACTION_KINDS,
   eventsByHolding,
+  GOLD_FORMS,
+  GOLD_PRICE_MODES,
   HOLDING_KINDS,
   insertOrder,
+  LIABILITY_KINDS,
   parseBackup,
   RULE_KINDS,
   SAVINGS_MODES,
@@ -29,8 +37,11 @@ import {
   TX_TYPES,
   type Backup,
 } from "./backup";
-import { accountBalance, type Tx } from "./finance-core/ledger";
-import { replayHolding } from "./finance-core/portfolio";
+import { cloudLine } from "./finance-core/clouds";
+import { goldPricesFor, type Karat } from "./finance-core/gold";
+import { accountBalance, netWorth, type Tx } from "./finance-core/ledger";
+import { outstanding } from "./finance-core/liabilities";
+import { portfolioValue, replayHolding } from "./finance-core/portfolio";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const BANK = id(1);
@@ -39,12 +50,28 @@ const CARD = id(3);
 const THNDR = id(4);
 const COMI = id(70); // a stock
 const GOLD_FUND = id(71); // a fund
+const GOLD = id(72); // physical gold, 21K bar
+const CLOUD = id(73); // a Savings Cloud
+const LOAN = id(60);
 const FOOD = id(11);
 const SALARY = id(12);
+const LOAN_INTEREST = id(13);
 const TRIP = id(22);
 const EMERGENCY = id(21);
 const FIXED_RULE = id(51);
 const at = (s: string) => new Date(s);
+type GoldForm = "bar" | "coin" | "jewelry";
+// Every holding row carries the gold and cloud columns; a stock or fund leaves them null.
+const noGoldOrCloud = {
+  karat: null as number | null,
+  form: null as GoldForm | null,
+  startDate: null as string | null,
+  maturityDate: null as string | null,
+  contributionAmount: null as number | null,
+  contributionFrequency: null as "weekly" | "monthly" | null,
+};
+const noHolding = { holdingId: null as string | null, percent: null as string | null };
+const noShare = { holdingId: null as string | null, percentDelta: null as string | null };
 
 // Shaped like Drizzle rows, user_id included, to prove it never reaches the file.
 const base = { userId: "user-1", createdAt: at("2026-03-01T08:00:00.000Z") };
@@ -57,6 +84,9 @@ const rows = {
     expectedMonthlyIncome: 3_000_000 as number | null,
     expectedMonthlySpending: 1_800_000 as number | null,
     staleDaysHoldings: 14,
+    goldPriceMode: "per_karat" as "derive_24k" | "per_karat",
+    staleDaysGold: 10,
+    staleDaysClouds: 45,
   },
   accounts: [
     { ...base, id: BANK, name: "CIB", type: "bank" as const, institution: "CIB", notes: null, isInvestment: false, openingBalance: 5_000_000, archivedAt: null, updatedAt: at("2026-03-02T08:00:00.000Z") },
@@ -67,6 +97,7 @@ const rows = {
   categories: [
     { ...base, id: FOOD, name: "Food", kind: "expense" as const, isEssential: true, archivedAt: null },
     { ...base, id: SALARY, name: "Salary", kind: "income" as const, isEssential: false, archivedAt: null },
+    { ...base, id: LOAN_INTEREST, name: "Loan interest", kind: "expense" as const, isEssential: true, archivedAt: null },
   ],
   transactions: [
     tx(101, { type: "INCOME", amount: 3_000_000, toAccountId: BANK, categoryId: SALARY }),
@@ -84,10 +115,39 @@ const rows = {
     // GOLD_FUND: a mistaken buy of 5 was voided; the real buy of 10 @ 50 follows, then a 2-for-1 split on 03-15.
     tx(111, { type: "INVESTMENT_PURCHASE", date: "2026-03-02", amount: 25_000, fromAccountId: BANK, holdingId: GOLD_FUND, quantity: "5.000000", unitPrice: "50.000000", status: "void", voidedAt: at("2026-03-03T10:00:00.000Z") }),
     tx(112, { type: "INVESTMENT_PURCHASE", date: "2026-03-03", amount: 50_000, fromAccountId: BANK, holdingId: GOLD_FUND, quantity: "10.000000", unitPrice: "50.000000", createdAt: at("2026-03-03T10:00:00.000Z") }),
+    // GOLD: 10 g of 21K at a metal price of 4,000 per gram plus 50.00 workmanship, which is the fee and goes into cost basis.
+    tx(113, { type: "INVESTMENT_PURCHASE", date: "2026-03-05", amount: 4_005_000, fromAccountId: BANK, fee: 5_000, holdingId: GOLD, quantity: "10.000000", unitPrice: "4000.000000" }),
+    // CLOUD: deposit 10,000.00 (then confirmed at that value), deposit 5,000.00 on 03-15, withdraw 2,000.00 on 03-20. No quantity, no price.
+    tx(114, { type: "INVESTMENT_PURCHASE", date: "2026-03-01", amount: 1_000_000, fromAccountId: BANK, holdingId: CLOUD, createdAt: at("2026-03-01T10:00:00.000Z") }),
+    tx(115, { type: "INVESTMENT_PURCHASE", date: "2026-03-15", amount: 500_000, fromAccountId: BANK, holdingId: CLOUD }),
+    tx(116, { type: "INVESTMENT_SALE", date: "2026-03-20", amount: 200_000, toAccountId: BANK, holdingId: CLOUD }),
+    // One loan payment: principal 3,000.00 and interest 120.00, written together with the same createdAt.
+    tx(117, { type: "LIABILITY_PAYMENT", date: "2026-03-18", amount: 300_000, fromAccountId: BANK, liabilityId: LOAN, createdAt: at("2026-03-18T09:00:00.000Z") }),
+    tx(118, { type: "EXPENSE", date: "2026-03-18", amount: 12_000, fromAccountId: BANK, categoryId: LOAN_INTEREST, liabilityId: LOAN, createdAt: at("2026-03-18T09:00:00.000Z") }),
   ],
   holdings: [
-    { ...base, id: COMI, accountId: THNDR, kind: "stock" as const, name: "Commercial International Bank", ticker: "COMI", notes: null as string | null, archivedAt: null as Date | null, updatedAt: base.createdAt },
-    { ...base, id: GOLD_FUND, accountId: THNDR, kind: "fund" as const, name: "Gold fund", ticker: null as string | null, notes: "bought on Thndr", archivedAt: null, updatedAt: base.createdAt },
+    { ...base, ...noGoldOrCloud, id: COMI, accountId: THNDR, kind: "stock" as const, name: "Commercial International Bank", ticker: "COMI", notes: null as string | null, archivedAt: null as Date | null, updatedAt: base.createdAt },
+    { ...base, ...noGoldOrCloud, id: GOLD_FUND, accountId: THNDR, kind: "fund" as const, name: "Gold fund", ticker: null as string | null, notes: "bought on Thndr", archivedAt: null, updatedAt: base.createdAt },
+    { ...base, ...noGoldOrCloud, id: GOLD, accountId: THNDR, kind: "gold" as "gold" | "stock", name: "Gold bar", ticker: null, notes: null, karat: 21 as number | null, form: "bar" as GoldForm | null, archivedAt: null, updatedAt: base.createdAt },
+    { ...base, ...noGoldOrCloud, id: CLOUD, accountId: THNDR, kind: "cloud" as "cloud" | "stock", name: "Savings Cloud", ticker: null, notes: null, startDate: "2026-03-01" as string | null, maturityDate: "2027-03-01" as string | null, contributionAmount: 100_000 as number | null, contributionFrequency: "monthly" as "weekly" | "monthly" | null, archivedAt: null, updatedAt: base.createdAt },
+  ],
+  // Gold is valued from these buy-back prices (per_karat mode: each karat has its own); 21K bought at 4,000 now buys back at 4,550.50.
+  goldPrices: [
+    { ...base, id: id(101), date: "2026-03-05", karat: 21, buybackPrice: "4400.000000" },
+    { ...base, id: id(102), date: "2026-03-28", karat: 21, buybackPrice: "4550.500000" },
+    { ...base, id: id(103), date: "2026-03-28", karat: 24, buybackPrice: "5200.000000" },
+  ],
+  rateHistory: [
+    { ...base, id: id(111), holdingId: CLOUD, effectiveDate: "2026-03-01", apy: "0.200000" as string | number },
+    { ...base, id: id(112), holdingId: CLOUD, effectiveDate: "2026-03-25", apy: "0.150000" as string | number },
+  ],
+  cloudConfirmations: [{ ...base, id: id(121), holdingId: CLOUD, date: "2026-03-01", value: 1_000_000, createdAt: at("2026-03-01T11:00:00.000Z") }],
+  liabilities: [
+    { ...base, id: LOAN, name: "Car loan", kind: "loan" as "loan" | "owed" | "other", openingBalance: 1_000_000, interestRate: "0.180000" as string | null, startDate: "2026-03-01", notes: null as string | null, archivedAt: null as Date | null, updatedAt: base.createdAt },
+  ],
+  liabilityUpdates: [
+    { ...base, id: id(131), liabilityId: LOAN, date: "2026-03-10", delta: 500_000, note: "borrowed more" as string | null },
+    { ...base, id: id(132), liabilityId: LOAN, date: "2026-03-20", delta: -50_000, note: null },
   ],
   priceUpdates: [
     { ...base, id: id(81), holdingId: COMI, date: "2026-03-22", price: "11.250000" },
@@ -104,13 +164,19 @@ const rows = {
     { ...base, id: TRIP, name: "Trip", targetAmount: 2_000_000, targetDate: "2026-12-01", startDate: "2026-03-01", priority: 2, plannedMonthly: null, expectedReturnOverride: null, manualCurrent: 150_000, notes: null, color: null, icon: null, archivedAt: at("2026-06-01T00:00:00.000Z"), updatedAt: base.createdAt },
   ],
   goalAllocations: [
-    { ...base, id: id(31), goalId: EMERGENCY, accountId: BANK, amount: 800_000, updatedAt: at("2026-03-12T08:00:00.000Z") },
-    { ...base, id: id(32), goalId: EMERGENCY, accountId: CASH, amount: 100_000, updatedAt: base.createdAt },
+    { ...base, ...noHolding, id: id(31), goalId: EMERGENCY, accountId: BANK as string | null, amount: 800_000 as number | null, updatedAt: at("2026-03-12T08:00:00.000Z") },
+    { ...base, ...noHolding, id: id(32), goalId: EMERGENCY, accountId: CASH as string | null, amount: 100_000 as number | null, updatedAt: base.createdAt },
+    // Two goals share the cloud, 25% and 75%: exactly all of it.
+    { ...base, id: id(33), goalId: EMERGENCY, accountId: null as string | null, amount: null as number | null, holdingId: CLOUD as string | null, percent: "0.250000" as string | null, updatedAt: base.createdAt },
+    { ...base, id: id(34), goalId: TRIP, accountId: null as string | null, amount: null as number | null, holdingId: CLOUD as string | null, percent: "0.750000" as string | null, updatedAt: base.createdAt },
   ],
   goalAllocationEvents: [
-    { ...base, id: id(41), goalId: EMERGENCY, accountId: BANK, delta: 900_000, date: "2026-03-10", note: null as string | null },
-    { ...base, id: id(42), goalId: EMERGENCY, accountId: BANK, delta: -100_000, date: "2026-03-12", note: "moved to cash" },
-    { ...base, id: id(43), goalId: EMERGENCY, accountId: CASH, delta: 100_000, date: "2026-03-12", note: null },
+    { ...base, ...noShare, id: id(41), goalId: EMERGENCY, accountId: BANK as string | null, delta: 900_000, date: "2026-03-10", note: null as string | null },
+    { ...base, ...noShare, id: id(42), goalId: EMERGENCY, accountId: BANK as string | null, delta: -100_000, date: "2026-03-12", note: "moved to cash" },
+    { ...base, ...noShare, id: id(43), goalId: EMERGENCY, accountId: CASH as string | null, delta: 100_000, date: "2026-03-12", note: null },
+    // The EGP value of the share at that moment, so later growth is never counted as a contribution.
+    { ...base, id: id(44), goalId: EMERGENCY, accountId: null as string | null, holdingId: CLOUD as string | null, percentDelta: "0.250000" as string | null, delta: 375_000, date: "2026-03-26", note: null },
+    { ...base, id: id(45), goalId: TRIP, accountId: null as string | null, holdingId: CLOUD as string | null, percentDelta: "0.750000" as string | null, delta: 1_125_000, date: "2026-03-26", note: null },
   ],
   allocationRules: [
     { ...base, id: FIXED_RULE, kind: "fixed" as "fixed" | "percentage" | "remainder", targetKind: "goal" as "goal" | "investments" | "cash", goalId: EMERGENCY as string | null, amount: 500_000 as number | null, percent: null as string | null },
@@ -127,7 +193,7 @@ function tx(n: number, f: Record<string, unknown>) {
   return {
     userId: "user-1",
     id: id(n),
-    type: "EXPENSE" as "EXPENSE" | "INCOME" | "TRANSFER" | "ADJUSTMENT" | "INVESTMENT_PURCHASE" | "INVESTMENT_SALE" | "DIVIDEND",
+    type: "EXPENSE" as "EXPENSE" | "INCOME" | "TRANSFER" | "ADJUSTMENT" | "INVESTMENT_PURCHASE" | "INVESTMENT_SALE" | "LIABILITY_PAYMENT" | "DIVIDEND",
     date: "2026-03-10",
     amount: 100,
     fromAccountId: null as string | null,
@@ -142,6 +208,7 @@ function tx(n: number, f: Record<string, unknown>) {
     holdingId: null as string | null,
     quantity: null as string | null,
     unitPrice: null as string | null,
+    liabilityId: null as string | null,
     replacesId: null as string | null,
     voidedAt: null as Date | null,
     createdAt: at("2026-03-10T09:00:00.000Z"),
@@ -166,7 +233,7 @@ const balances = (b: { accounts: { id: string; openingBalance: number }[]; trans
 
 describe("backup format", () => {
   it("lists the same enum values as db/schema.ts", () => {
-    expect([ACCOUNT_TYPES, CATEGORY_KINDS, TX_TYPES, TX_STATUSES, SAVINGS_MODES, RULE_KINDS, TARGET_KINDS, HOLDING_KINDS, CORPORATE_ACTION_KINDS]).toEqual([
+    expect([ACCOUNT_TYPES, CATEGORY_KINDS, TX_TYPES, TX_STATUSES, SAVINGS_MODES, RULE_KINDS, TARGET_KINDS, HOLDING_KINDS, CORPORATE_ACTION_KINDS, GOLD_FORMS, CONTRIBUTION_FREQUENCIES, GOLD_PRICE_MODES, LIABILITY_KINDS]).toEqual([
       accountType.enumValues,
       categoryKind.enumValues,
       transactionType.enumValues,
@@ -176,6 +243,10 @@ describe("backup format", () => {
       allocationTargetKind.enumValues,
       holdingKind.enumValues,
       corporateActionKind.enumValues,
+      goldForm.enumValues,
+      contributionFrequency.enumValues,
+      goldPriceMode.enumValues,
+      liabilityKind.enumValues,
     ]);
   });
 
@@ -191,7 +262,8 @@ describe("backup format", () => {
 
     const before = balances({ accounts: rows.accounts, transactions: serializeBackup(rows).transactions });
     expect(before).toEqual({
-      [BANK]: 5_000_000 + 3_000_000 - 45_050 - 500_000 - 105_150 - 50_000,
+      // salary - lunch - transfer - COMI buy - fund buy - gold buy - 2 cloud deposits + cloud withdrawal - loan principal - loan interest
+      [BANK]: 5_000_000 + 3_000_000 - 45_050 - 500_000 - 105_150 - 50_000 - 4_005_000 - 1_000_000 - 500_000 + 200_000 - 300_000 - 12_000,
       [CASH]: 500_000 - 7_500,
       [CARD]: -120_000 - 12_000,
       [THNDR]: 47_850 + 18_000,
@@ -211,13 +283,16 @@ describe("backup format", () => {
       expectedMonthlyIncome: 3_000_000,
       expectedMonthlySpending: 1_800_000,
       staleDaysHoldings: 14,
+      goldPriceMode: "per_karat",
+      staleDaysGold: 10,
+      staleDaysClouds: 45,
     });
     expect(backup.goals.map((g) => g.expectedReturnOverride)).toEqual([0.12, null]);
     expect(backup.allocationRules.map((r) => r.percent)).toEqual([null, 0.25, null]);
 
     const parsed = parseBackup(JSON.parse(JSON.stringify(backup)));
     expect(parsed).toEqual({ ok: true, backup });
-    expect([backup.goals.length, backup.goalAllocations.length, backup.goalAllocationEvents.length]).toEqual([2, 2, 3]);
+    expect([backup.goals.length, backup.goalAllocations.length, backup.goalAllocationEvents.length]).toEqual([2, 4, 5]);
     expect([backup.allocationRules.length, backup.allocationOverrides.length]).toEqual([3, 2]);
   });
 });
@@ -258,13 +333,161 @@ describe("round trip of holdings", () => {
   });
 });
 
+describe("round trip of gold, clouds, loans and holding shares (version 4)", () => {
+  // Net worth as the engines compute it from a backup: cash + stocks/funds + gold + clouds - liabilities.
+  const wealth = (b: Backup, today: string) => {
+    const events = eventsByHolding(toHoldingEvents(b.transactions, b.corporateActions));
+    const goldPrices = b.goldPrices.map((p) => ({ date: p.date, karat: p.karat as Karat, price: p.buybackPrice, createdAt: p.createdAt }));
+    const units = b.holdings
+      .filter((h) => h.kind !== "cloud")
+      .map((h) => ({
+        id: h.id,
+        events: events.get(h.id) ?? [],
+        priceUpdates:
+          h.kind === "gold"
+            ? goldPricesFor(goldPrices, h.karat as Karat, b.settings.goldPriceMode)
+            : b.priceUpdates.filter((p) => p.holdingId === h.id),
+      }));
+    const clouds = b.holdings
+      .filter((h) => h.kind === "cloud")
+      .map((h) =>
+        cloudLine({
+          id: h.id,
+          confirmations: b.cloudConfirmations.filter((c) => c.holdingId === h.id).map((c) => ({ date: c.date, createdAt: c.createdAt, value: c.value })),
+          cashFlows: b.transactions
+            .filter((t) => t.holdingId === h.id && t.status === "posted")
+            .map((t) => ({ date: t.date, createdAt: t.createdAt, kind: t.type === "INVESTMENT_PURCHASE" ? ("deposit" as const) : ("withdrawal" as const), amount: t.amount })),
+          rates: b.rateHistory.filter((r) => r.holdingId === h.id).map((r) => ({ date: r.effectiveDate, createdAt: r.createdAt, apy: r.apy })),
+          today,
+        }),
+      );
+    const portfolio = portfolioValue(units, today, b.settings.staleDaysHoldings, clouds);
+    const cash = Object.values(balances(b)).reduce((sum, v) => sum + v, 0);
+    const liabilities = b.liabilities.reduce(
+      (sum, l) =>
+        sum +
+        outstanding(
+          l.openingBalance,
+          b.liabilityUpdates.filter((u) => u.liabilityId === l.id),
+          b.transactions.filter((t) => t.type === "LIABILITY_PAYMENT" && t.status === "posted" && t.liabilityId === l.id),
+        ),
+      0,
+    );
+    return { cash, portfolio: portfolio.total, gold: portfolio.lines.find((l) => l.id === GOLD)!.value, cloud: clouds[0].value, liabilities, netWorth: netWorth({ cash, holdings: portfolio.total, liabilities }) };
+  };
+
+  it("keeps every new table and column, with decimals as strings and rates as numbers", () => {
+    const backup = serializeBackup(rows, EXPORTED_AT);
+    expect(backup.goldPrices.map((p) => [p.karat, p.buybackPrice])).toEqual([[21, "4400.000000"], [21, "4550.500000"], [24, "5200.000000"]]);
+    expect(backup.rateHistory.map((r) => r.apy)).toEqual([0.2, 0.15]);
+    expect(backup.cloudConfirmations[0]).toMatchObject({ holdingId: CLOUD, value: 1_000_000 });
+    expect(backup.liabilities[0]).toMatchObject({ openingBalance: 1_000_000, interestRate: 0.18, kind: "loan" });
+    expect(backup.liabilityUpdates.map((u) => u.delta)).toEqual([500_000, -50_000]);
+    expect(backup.holdings.slice(2).map((h) => [h.kind, h.karat, h.form, h.startDate, h.contributionAmount, h.contributionFrequency])).toEqual([
+      ["gold", 21, "bar", null, null, null],
+      ["cloud", null, null, "2026-03-01", 100_000, "monthly"],
+    ]);
+    expect(backup.goalAllocations.slice(2).map((a) => [a.accountId, a.amount, a.holdingId, a.percent])).toEqual([
+      [null, null, CLOUD, 0.25],
+      [null, null, CLOUD, 0.75],
+    ]);
+    expect(backup.goalAllocationEvents.slice(3).map((e) => [e.accountId, e.holdingId, e.percentDelta, e.delta])).toEqual([
+      [null, CLOUD, 0.25, 375_000],
+      [null, CLOUD, 0.75, 1_125_000],
+    ]);
+    expect(backup.transactions[16]).toMatchObject({ type: "LIABILITY_PAYMENT", liabilityId: LOAN });
+    expect(backup.transactions[13]).toMatchObject({ holdingId: CLOUD, quantity: null, unitPrice: null });
+    expect(parseBackup(JSON.parse(JSON.stringify(backup)))).toEqual({ ok: true, backup });
+  });
+
+  it("restores to the same net worth: gold at buy-back, the cloud estimate and the loan balance", () => {
+    const backup = serializeBackup(rows, EXPORTED_AT);
+    const parsed = parseBackup(JSON.parse(JSON.stringify(backup)));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    const before = wealth(backup, "2026-04-30");
+    expect(wealth(parsed.backup, "2026-04-30")).toEqual(before);
+    expect(before.gold).toBe(4_550_500); // 10 g x 4,550.50 buy-back, not the 4,000 paid
+    expect(before.liabilities).toBe(1_000_000 + 500_000 - 50_000 - 300_000);
+    expect(before.cloud).toBeGreaterThan(1_000_000); // grown from the confirmed 10,000.00 at 20% then 15%
+    expect(before.netWorth).toBe(before.cash + before.portfolio - before.liabilities);
+  });
+
+  it("does not treat a cloud deposit as a unit purchase", () => {
+    const events = eventsByHolding(toHoldingEvents(serializeBackup(rows, EXPORTED_AT).transactions, []));
+    expect(events.has(CLOUD)).toBe(false);
+    expect(events.get(GOLD)).toHaveLength(1);
+  });
+});
+
 // What the older app versions wrote: v1 has no goals, rules or savings settings; v2 adds them but has no holdings.
+// v3 files have no gold, clouds, liabilities or holding shares: drop them and the columns they added.
+const stripV4 = (b: any) => { // eslint-disable-line @typescript-eslint/no-explicit-any
+  for (const key of ["goldPrices", "rateHistory", "cloudConfirmations", "liabilities", "liabilityUpdates"]) delete b[key];
+  for (const key of ["goldPriceMode", "staleDaysGold", "staleDaysClouds"]) delete b.settings[key];
+  const dropped = new Set(b.holdings.filter((h: any) => h.kind === "gold" || h.kind === "cloud").map((h: any) => h.id)); // eslint-disable-line @typescript-eslint/no-explicit-any
+  b.holdings = b.holdings.filter((h: any) => !dropped.has(h.id)); // eslint-disable-line @typescript-eslint/no-explicit-any
+  for (const h of b.holdings) for (const key of ["karat", "form", "startDate", "maturityDate", "contributionAmount", "contributionFrequency"]) delete h[key];
+  b.transactions = b.transactions.filter((t: any) => !dropped.has(t.holdingId) && t.liabilityId === null); // eslint-disable-line @typescript-eslint/no-explicit-any
+  for (const t of b.transactions) delete t.liabilityId;
+  b.goalAllocations = b.goalAllocations.filter((a: any) => a.holdingId === null); // eslint-disable-line @typescript-eslint/no-explicit-any
+  b.goalAllocationEvents = b.goalAllocationEvents.filter((e: any) => e.holdingId === null); // eslint-disable-line @typescript-eslint/no-explicit-any
+  for (const row of [...b.goalAllocations, ...b.goalAllocationEvents]) for (const key of ["holdingId", "percent", "percentDelta"]) delete row[key];
+};
+
 const stripHoldings = (b: any) => { // eslint-disable-line @typescript-eslint/no-explicit-any
+  stripV4(b);
   for (const key of HOLDING_KEYS) delete b[key];
   b.transactions = b.transactions.filter((t: any) => t.holdingId === null); // eslint-disable-line @typescript-eslint/no-explicit-any
   for (const t of b.transactions) for (const key of ["holdingId", "quantity", "unitPrice"]) delete t[key];
   delete b.settings.staleDaysHoldings;
 };
+
+describe("version 3 files", () => {
+  const v3 = () => {
+    const b: any = valid(); // eslint-disable-line @typescript-eslint/no-explicit-any
+    stripV4(b);
+    b.version = 3;
+    return b;
+  };
+
+  it("still restore, with the new collections empty, the new columns null and the default gold and cloud settings", () => {
+    const file = v3();
+    const parsed = parseBackup(file);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const b = parsed.backup;
+    expect(b.version).toBe(BACKUP_VERSION);
+    expect([b.goldPrices, b.rateHistory, b.cloudConfirmations, b.liabilities, b.liabilityUpdates]).toEqual([[], [], [], [], []]);
+    expect(b.settings).toMatchObject({ goldPriceMode: "derive_24k", staleDaysGold: 14, staleDaysClouds: 30, staleDaysHoldings: 14 });
+    expect(b.holdings.map((h) => h.kind)).toEqual(["stock", "fund"]);
+    expect(b.holdings.every((h) => h.karat === null && h.form === null && h.startDate === null && h.contributionAmount === null)).toBe(true);
+    expect(b.transactions.every((t) => t.liabilityId === null)).toBe(true);
+    expect(b.goalAllocations.every((a) => a.accountId !== null && a.holdingId === null && a.percent === null)).toBe(true);
+    expect(b.goalAllocationEvents.every((e) => e.accountId !== null && e.holdingId === null && e.percentDelta === null)).toBe(true);
+    expect(balances(b)).toEqual(balances(file));
+  });
+
+  it("are still validated like before: a cash allocation needs an account and a trade needs a quantity", () => {
+    const file = v3();
+    file.goalAllocations[0].accountId = null;
+    expect(parseBackup(file)).toMatchObject({ ok: false });
+    const other = v3();
+    other.transactions[7].quantity = null;
+    expect(parseBackup(other)).toMatchObject({ ok: false });
+  });
+
+  it("ignore new-format fields they should not have", () => {
+    const file = v3();
+    file.holdings[0].karat = 24;
+    file.transactions[0].liabilityId = id(99);
+    file.settings.goldPriceMode = "auto";
+    const parsed = parseBackup(file);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect([parsed.backup.holdings[0].karat, parsed.backup.settings.goldPriceMode]).toEqual([null, "derive_24k"]);
+  });
+});
 
 describe("version 2 files", () => {
   const v2 = () => {
@@ -330,6 +553,9 @@ describe("version 1 files", () => {
       expectedMonthlyIncome: null,
       expectedMonthlySpending: null,
       staleDaysHoldings: 7,
+      goldPriceMode: "derive_24k",
+      staleDaysGold: 14,
+      staleDaysClouds: 30,
     });
     expect(b.accounts).toEqual(file.accounts);
     expect(balances(b)).toEqual(balances(file));
@@ -366,7 +592,7 @@ describe("parseBackup rejects", () => {
       if (!result.ok) expect(result.error).toContain("JSON object");
     });
     rejects([
-      ["unknown version", (b) => (b.version = 4 as never), "version: 4 is not supported"],
+      ["unknown version", (b) => (b.version = 5 as never), "version: 5 is not supported"],
       ["fractional version", (b) => (b.version = 2.5 as never), "version: 2.5 is not supported"],
       ["version 0", (b) => (b.version = 0 as never), "version: 0 is not supported"],
       ["missing version", (b) => delete b.version, "version: undefined"],
@@ -594,7 +820,7 @@ describe("parseBackup rejects (version 3 additions)", () => {
 
   describe("holdings", () => {
     rejects([
-      ["kind outside the enum", (b) => (holding0(b).kind = "gold" as never), "holdings[0].kind: must be one of"],
+      ["kind outside the enum", (b) => (holding0(b).kind = "crypto" as never), "holdings[0].kind: must be one of"],
       ["empty name", (b) => (holding0(b).name = " "), "holdings[0].name: must not be empty"],
       ["NUL character in the ticker", (b) => (holding0(b).ticker = "A\0B"), "holdings[0].ticker: must be text"],
       ["account that is not in the file", (b) => (holding0(b).accountId = id(99)), "holdings[0].accountId: refers to an account that is not in the file"],
@@ -690,8 +916,7 @@ describe("parseBackup rejects (version 3 additions)", () => {
 
     it("accepts a sale of exactly the whole position", () => {
       const b = valid();
-      trade(b, 1).quantity = "110.000000";
-      trade(b, 1).grossAmount = 132_000;
+      Object.assign(trade(b, 1), { quantity: "110.000000", grossAmount: 132_000, amount: 131_850 }); // 1,320.00 - 1.00 fee - 0.50 tax
       expect(parseBackup(b).ok).toBe(true);
     });
 
@@ -710,6 +935,313 @@ describe("parseBackup rejects (version 3 additions)", () => {
       Object.assign(trade(b, 1), { date: "2026-03-01", createdAt: "2026-03-01T09:00:00Z" });
       Object.assign(trade(b, 0), { createdAt: "2026-03-01T09:00:00.500Z" });
       expect(parseBackup(b)).toMatchObject({ ok: false });
+    });
+  });
+});
+
+const gold = (b: Backup) => b.holdings[2];
+const cloud = (b: Backup) => b.holdings[3];
+const goldBuy = (b: Backup) => b.transactions[12];
+const deposit = (b: Backup) => b.transactions[13];
+const withdrawal = (b: Backup) => b.transactions[15];
+const principal = (b: Backup) => b.transactions[16];
+const cashShare = (b: Backup) => b.goalAllocations[2];
+const shareEvent = (b: Backup) => b.goalAllocationEvents[3];
+
+describe("parseBackup rejects (version 4 additions)", () => {
+  describe("a version 4 file with a missing collection", () => {
+    rejects([
+      ["goldPrices missing", (b) => delete b.goldPrices, "goldPrices: must be a list"],
+      ["rateHistory not a list", (b) => (b.rateHistory = {} as never), "rateHistory: must be a list"],
+      ["cloudConfirmations missing", (b) => delete b.cloudConfirmations, "cloudConfirmations: must be a list"],
+      ["liabilities missing", (b) => delete b.liabilities, "liabilities: must be a list"],
+      ["liabilityUpdates missing", (b) => delete b.liabilityUpdates, "liabilityUpdates: must be a list"],
+    ]);
+  });
+
+  describe("gold price mode and stale days (user_settings checks)", () => {
+    rejects([
+      ["price mode outside the enum", (b) => (b.settings.goldPriceMode = "auto" as never), "settings.goldPriceMode: must be one of"],
+      ["gold stale days zero", (b) => (b.settings.staleDaysGold = 0), "settings.staleDaysGold: must be a whole number of days from 1 to 365"],
+      ["cloud stale days 366", (b) => (b.settings.staleDaysClouds = 366), "settings.staleDaysClouds: must be a whole number of days from 1 to 365"],
+      ["cloud stale days with a fraction", (b) => (b.settings.staleDaysClouds = 7.5), "settings.staleDaysClouds"],
+      ["gold stale days missing", (b) => delete b.settings.staleDaysGold, "settings.staleDaysGold"],
+    ]);
+  });
+
+  describe("gold and cloud fields on holdings (holdings_*_check)", () => {
+    rejects([
+      ["gold without a karat", (b) => (gold(b).karat = null), "a gold holding needs a karat of 24, 21 or 18 and a form"],
+      ["gold of 22 karat", (b) => (gold(b).karat = 22), "a gold holding needs a karat of 24, 21 or 18 and a form"],
+      ["gold without a form", (b) => (gold(b).form = null), "a gold holding needs a karat of 24, 21 or 18 and a form"],
+      ["form outside the enum", (b) => (gold(b).form = "ingot" as never), "holdings[2].form: must be one of"],
+      ["a stock with a karat", (b) => (holding0(b).karat = 24), "only a gold holding has a karat and a form"],
+      ["a fund with a form", (b) => (b.holdings[1].form = "bar"), "only a gold holding has a karat and a form"],
+      ["gold with a start date", (b) => (gold(b).startDate = "2026-03-01"), "only a cloud has a start date, a maturity date or a contribution"],
+      ["a stock with a contribution", (b) => Object.assign(holding0(b), { contributionAmount: 1_000, contributionFrequency: "weekly" }), "only a cloud has a start date"],
+      ["a cloud with a karat", (b) => (cloud(b).karat = 24), "only a gold holding has a karat and a form"],
+      ["a contribution without a frequency", (b) => (cloud(b).contributionFrequency = null), "contributionAmount and contributionFrequency are set together or not at all"],
+      ["a frequency without a contribution", (b) => (cloud(b).contributionAmount = null), "contributionAmount and contributionFrequency are set together or not at all"],
+      ["frequency outside the enum", (b) => (cloud(b).contributionFrequency = "daily" as never), "holdings[3].contributionFrequency: must be one of"],
+      ["a contribution of zero", (b) => (cloud(b).contributionAmount = 0), "holdings[3].contributionAmount: must be above zero"],
+      ["a maturity date before the start date", (b) => (cloud(b).maturityDate = "2026-02-28"), "holdings[3].maturityDate: must not be before the start date"],
+      ["an impossible start date", (b) => (cloud(b).startDate = "2026-02-30"), "holdings[3].startDate: must be a real date"],
+    ]);
+
+    it("accepts a cloud with no maturity date and no contribution, and one maturing on its start date", () => {
+      const b = valid();
+      Object.assign(cloud(b), { maturityDate: null, contributionAmount: null, contributionFrequency: null });
+      expect(parseBackup(b).ok).toBe(true);
+      Object.assign(cloud(b), { maturityDate: cloud(b).startDate });
+      expect(parseBackup(b).ok).toBe(true);
+    });
+  });
+
+  describe("gold prices (gold_prices_*_check)", () => {
+    rejects([
+      ["karat 22", (b) => (b.goldPrices[0].karat = 22), "goldPrices[0].karat: must be 24, 21 or 18"],
+      ["karat as text", (b) => (b.goldPrices[0].karat = "21" as never), "goldPrices[0].karat"],
+      ["negative price", (b) => (b.goldPrices[0].buybackPrice = "-1"), "goldPrices[0].buybackPrice: must be a decimal string"],
+      ["price as a number", (b) => (b.goldPrices[0].buybackPrice = 4400 as never), "goldPrices[0].buybackPrice"],
+      ["price with 7 decimals", (b) => (b.goldPrices[0].buybackPrice = "1.1234567"), "goldPrices[0].buybackPrice"],
+      ["impossible date", (b) => (b.goldPrices[0].date = "2026-02-30"), "goldPrices[0].date: must be a real date"],
+      ["duplicate id", (b) => (b.goldPrices[1].id = id(101)), "goldPrices.id: appears twice"],
+    ]);
+
+    it("accepts a price of zero", () => {
+      const b = valid();
+      b.goldPrices[0].buybackPrice = "0";
+      expect(parseBackup(b).ok).toBe(true);
+    });
+  });
+
+  describe("rate history (rate_history_apy_check, belongs to a cloud)", () => {
+    rejects([
+      ["APY of exactly -100%", (b) => (b.rateHistory[0].apy = -1), "rateHistory[0].apy: must be above -1"],
+      ["APY below -100%", (b) => (b.rateHistory[0].apy = -1.5), "rateHistory[0].apy: must be above -1"],
+      ["APY as text", (b) => (b.rateHistory[0].apy = "20%" as never), "rateHistory[0].apy"],
+      ["APY too large for the column", (b) => (b.rateHistory[0].apy = 100), "rateHistory[0].apy"],
+      ["a rate change of a stock", (b) => (b.rateHistory[0].holdingId = COMI), "rateHistory[0].holdingId: must belong to a cloud holding"],
+      ["a rate change of gold", (b) => (b.rateHistory[0].holdingId = GOLD), "must belong to a cloud holding"],
+      ["unknown holding", (b) => (b.rateHistory[0].holdingId = id(99)), "rateHistory[0].holdingId: refers to a holding that is not in the file"],
+      ["impossible effective date", (b) => (b.rateHistory[0].effectiveDate = "2026-02-30"), "rateHistory[0].effectiveDate: must be a real date"],
+      ["duplicate id", (b) => (b.rateHistory[1].id = id(111)), "rateHistory.id: appears twice"],
+    ]);
+
+    it("accepts a negative APY above -100%", () => {
+      const b = valid();
+      b.rateHistory[1].apy = -0.05;
+      expect(parseBackup(b).ok).toBe(true);
+    });
+  });
+
+  describe("cloud confirmations (cloud_confirmations_value_check, belongs to a cloud)", () => {
+    rejects([
+      ["negative value", (b) => (b.cloudConfirmations[0].value = -1), "cloudConfirmations[0].value: must not be negative"],
+      ["value with a fraction", (b) => (b.cloudConfirmations[0].value = 10.5), "cloudConfirmations[0].value"],
+      ["a confirmation of a stock", (b) => (b.cloudConfirmations[0].holdingId = COMI), "cloudConfirmations[0].holdingId: must belong to a cloud holding"],
+      ["unknown holding", (b) => (b.cloudConfirmations[0].holdingId = id(99)), "cloudConfirmations[0].holdingId: refers to a holding"],
+      ["duplicate id", (b) => b.cloudConfirmations.push({ ...b.cloudConfirmations[0] }), "cloudConfirmations.id: appears twice"],
+    ]);
+
+    it("accepts a confirmed value of zero", () => {
+      const b = valid();
+      b.cloudConfirmations[0].value = 0;
+      // The 10,000.00 deposit is dated the same day and created before the confirmation, so only the later flows remain.
+      Object.assign(withdrawal(b), { amount: 1_000, date: "2026-03-20" });
+      expect(parseBackup(b).ok).toBe(true);
+    });
+  });
+
+  describe("quantity and unit price by holding kind", () => {
+    rejects([
+      ["a cloud deposit with a quantity and a price", (b) => Object.assign(deposit(b), { quantity: "1", unitPrice: "1" }), "transactions[13]: a cloud deposit or withdrawal has no quantity or unitPrice"],
+      ["a cloud withdrawal with a quantity and a price", (b) => Object.assign(withdrawal(b), { quantity: "1", unitPrice: "1" }), "a cloud deposit or withdrawal has no quantity or unitPrice"],
+      ["a cloud deposit with only a quantity", (b) => (deposit(b).quantity = "1"), "needs a quantity above zero and a unitPrice (a cloud deposit or withdrawal has neither)"],
+      ["a gold purchase with neither", (b) => Object.assign(goldBuy(b), { quantity: null, unitPrice: null }), "transactions[12]: INVESTMENT_PURCHASE on a holding needs a quantity above zero and a unitPrice"],
+      ["a stock sale with neither", (b) => Object.assign(trade(b, 1), { quantity: null, unitPrice: null }), "transactions[8]: INVESTMENT_SALE on a holding needs a quantity above zero and a unitPrice"],
+      ["a dividend on a cloud", (b) => (trade(b, 2).holdingId = CLOUD), "transactions[9].holdingId: a cloud holding has no dividends"],
+      ["a dividend on gold", (b) => (trade(b, 2).holdingId = GOLD), "a gold holding has no dividends"],
+    ]);
+  });
+
+  describe("a cloud withdrawal never exceeds the estimated value (rate history, confirmations, deposits)", () => {
+    rejects([
+      ["a withdrawal above everything ever put in", (b) => (withdrawal(b).amount = 5_000_000), "holdings[3]: A withdrawal is larger than the cloud's estimated value (on 2026-03-20)"],
+      ["a withdrawal dated before the second deposit", (b) => Object.assign(withdrawal(b), { date: "2026-03-02", amount: 1_500_000 }), "holdings[3]: A withdrawal is larger than the cloud's estimated value (on 2026-03-02)"],
+      ["a withdrawal on a cloud that has nothing in it", (b) => Object.assign(withdrawal(b), { date: "2026-02-01" }), "holdings[3]: A withdrawal is larger than the cloud's estimated value (on 2026-02-01)"],
+      [
+        "a deposit moved to after the withdrawal that needed it",
+        (b) => {
+          Object.assign(b.transactions[14], { date: "2026-03-25" });
+          withdrawal(b).amount = 1_100_000;
+        },
+        "holdings[3]: A withdrawal is larger",
+      ],
+    ]);
+
+    it("a confirmed lower value makes a later withdrawal too large", () => {
+      const b = valid();
+      b.cloudConfirmations.push({ id: id(122), holdingId: CLOUD, date: "2026-03-19", value: 100_000, createdAt: "2026-03-19T09:00:00.000Z" });
+      expect(parseBackup(b)).toMatchObject({ ok: false });
+    });
+
+    it("accepts a withdrawal of exactly the estimated value, and refuses one piaster more", () => {
+      const b = valid();
+      // Dated on the confirmation day and created after it: the estimate is exactly the confirmed 10,000.00.
+      Object.assign(withdrawal(b), { date: "2026-03-01", createdAt: "2026-03-01T12:00:00.000Z", amount: 1_000_000 });
+      expect(parseBackup(b).ok).toBe(true);
+      withdrawal(b).amount = 1_000_001;
+      expect(parseBackup(b)).toMatchObject({ ok: false });
+    });
+
+    it("ignores a void or pending withdrawal", () => {
+      const b = valid();
+      Object.assign(withdrawal(b), { amount: 5_000_000, status: "void", voidedAt: "2026-03-21T09:00:00.000Z" });
+      expect(parseBackup(b).ok).toBe(true);
+      Object.assign(withdrawal(b), { status: "pending", voidedAt: null });
+      expect(parseBackup(b).ok).toBe(true);
+    });
+  });
+
+  describe("the cash of a posted unit trade matches quantity x unit price (+/- fee and tax)", () => {
+    rejects([
+      ["a purchase that cost a piaster more", (b) => (trade(b, 0).amount += 1), "transactions[7].amount: does not equal quantity x unitPrice plus fee"],
+      ["a purchase whose fee was not added", (b) => (trade(b, 0).fee = 0), "transactions[7].amount: does not equal quantity x unitPrice plus fee"],
+      ["a gold purchase without its workmanship", (b) => (goldBuy(b).amount = 4_000_000), "transactions[12].amount: does not equal quantity x unitPrice plus fee"],
+      ["a gold purchase whose metal price changed", (b) => (goldBuy(b).unitPrice = "4001.000000"), "transactions[12].amount: does not equal"],
+      ["a sale that paid a piaster more", (b) => (trade(b, 1).amount += 1), "transactions[8].amount: does not equal quantity x unitPrice minus fee and tax withheld"],
+      ["a sale whose tax was ignored", (b) => (trade(b, 1).taxWithheld = null), "transactions[8].amount: does not equal quantity x unitPrice minus fee and tax withheld"],
+      ["a sale with the wrong gross amount", (b) => (trade(b, 1).grossAmount = 48_001), "transactions[8].grossAmount: does not equal quantity x unitPrice"],
+      ["a sale with no gross amount", (b) => (trade(b, 1).grossAmount = null), "transactions[8].grossAmount: does not equal quantity x unitPrice"],
+      ["a purchase whose quantity changed but not its cash", (b) => (trade(b, 4).quantity = "11.000000"), "transactions[11].amount: does not equal quantity x unitPrice plus fee"],
+    ]);
+
+    it("does not check void or pending trades, which move no money", () => {
+      const b = valid();
+      trade(b, 3).amount = 1; // the voided purchase of 5 units
+      b.transactions[6].amount = 1; // the pending purchase
+      expect(parseBackup(b).ok).toBe(true);
+    });
+
+    it("accepts a sale whose fee and tax are zero", () => {
+      const b = valid();
+      Object.assign(trade(b, 1), { fee: 0, taxWithheld: null, amount: 48_000 });
+      expect(parseBackup(b).ok).toBe(true);
+    });
+  });
+
+  describe("liabilities and their updates (liabilities_*_check, liability_updates_delta_check)", () => {
+    rejects([
+      ["opening balance zero", (b) => (b.liabilities[0].openingBalance = 0), "liabilities[0].openingBalance: must be above zero"],
+      ["opening balance negative", (b) => (b.liabilities[0].openingBalance = -5), "liabilities[0].openingBalance: must be above zero"],
+      ["opening balance with a fraction", (b) => (b.liabilities[0].openingBalance = 10.5), "liabilities[0].openingBalance"],
+      ["negative interest rate", (b) => (b.liabilities[0].interestRate = -0.01), "liabilities[0].interestRate: must not be negative"],
+      ["interest rate as text", (b) => (b.liabilities[0].interestRate = "18%" as never), "liabilities[0].interestRate"],
+      ["kind outside the enum", (b) => (b.liabilities[0].kind = "mortgage" as never), "liabilities[0].kind: must be one of"],
+      ["empty name", (b) => (b.liabilities[0].name = " "), "liabilities[0].name: must not be empty"],
+      ["impossible start date", (b) => (b.liabilities[0].startDate = "2026-02-30"), "liabilities[0].startDate: must be a real date"],
+      ["duplicate liability id", (b) => b.liabilities.push({ ...b.liabilities[0] }), "liabilities.id: appears twice"],
+      ["update of zero", (b) => (b.liabilityUpdates[0].delta = 0), "liabilityUpdates[0].delta: must not be zero"],
+      ["update with a fraction", (b) => (b.liabilityUpdates[0].delta = 0.5), "liabilityUpdates[0].delta"],
+      ["update of an unknown liability", (b) => (b.liabilityUpdates[0].liabilityId = id(99)), "liabilityUpdates[0].liabilityId: refers to a liability that is not in the file"],
+      ["update with an impossible date", (b) => (b.liabilityUpdates[0].date = "2026-02-30"), "liabilityUpdates[0].date: must be a real date"],
+      ["duplicate update id", (b) => (b.liabilityUpdates[1].id = id(131)), "liabilityUpdates.id: appears twice"],
+    ]);
+
+    it("accepts a liability with no interest rate, archived, and a negative update", () => {
+      const b = valid();
+      Object.assign(b.liabilities[0], { interestRate: null, archivedAt: "2026-04-01T00:00:00.000Z" });
+      expect(b.liabilityUpdates[1].delta).toBeLessThan(0);
+      expect(parseBackup(b).ok).toBe(true);
+    });
+  });
+
+  describe("liability payments (transactions_liability_type_check, principal within the outstanding balance)", () => {
+    rejects([
+      ["a liability id on an INCOME", (b) => (tx0(b).liabilityId = LOAN), "transactions[0].liabilityId: only a LIABILITY_PAYMENT or an EXPENSE may belong to a liability, not INCOME"],
+      ["a liability id on a transfer", (b) => (transfer(b).liabilityId = LOAN), "only a LIABILITY_PAYMENT or an EXPENSE may belong to a liability, not TRANSFER"],
+      ["a payment of an unknown liability", (b) => (principal(b).liabilityId = id(99)), "transactions[16].liabilityId: refers to a liability that is not in the file"],
+      ["an interest expense of an unknown liability", (b) => (b.transactions[17].liabilityId = id(99)), "transactions[17].liabilityId: refers to a liability"],
+      ["a principal payment above the balance", (b) => (principal(b).amount = 2_000_000), "liabilities[0]: a principal payment is larger than the balance outstanding"],
+      [
+        "two payments that together exceed the balance",
+        (b) => b.transactions.push({ ...principal(b), id: id(140), amount: 1_200_000 }),
+        "liabilities[0]: a principal payment is larger than the balance outstanding",
+      ],
+      ["a payment after a correction that removed the balance", (b) => (b.liabilityUpdates[1].delta = -1_300_000), "liabilities[0]: a principal payment is larger"],
+    ]);
+
+    it("accepts a payment of exactly the balance, and refuses one piaster more", () => {
+      const b = valid();
+      principal(b).amount = 1_450_000; // 10,000.00 opening + 5,000.00 borrowed - 500.00 correction
+      expect(parseBackup(b).ok).toBe(true);
+      principal(b).amount = 1_450_001;
+      expect(parseBackup(b)).toMatchObject({ ok: false });
+    });
+
+    it("ignores a voided payment, and accepts a payment against a general (credit card) liability id of null", () => {
+      const b = valid();
+      Object.assign(principal(b), { amount: 5_000_000, status: "void", voidedAt: "2026-03-19T09:00:00.000Z" });
+      expect(parseBackup(b).ok).toBe(true);
+      Object.assign(principal(b), { status: "posted", voidedAt: null, liabilityId: null, amount: 5_000_000 });
+      expect(parseBackup(b).ok).toBe(true);
+    });
+  });
+
+  describe("goal shares of holdings (goal_allocations_shape_check, unique goal and holding, at most 100% per holding)", () => {
+    rejects([
+      ["a share of zero", (b) => (cashShare(b).percent = 0), "goalAllocations[2]: a holding share needs a holdingId and a percent above 0 and up to 1"],
+      ["a share above 100%", (b) => (cashShare(b).percent = 1.5), "a holding share needs a holdingId and a percent above 0 and up to 1"],
+      ["a negative share", (b) => (cashShare(b).percent = -0.1), "a holding share needs a holdingId and a percent above 0 and up to 1"],
+      ["a share with 7 decimals", (b) => (cashShare(b).percent = 0.1234567), "goalAllocations[2].percent: must have at most 6 decimals"],
+      ["a share as text", (b) => (cashShare(b).percent = "25%" as never), "goalAllocations[2].percent"],
+      ["a share without a holding", (b) => (cashShare(b).holdingId = null), "a holding share needs a holdingId"],
+      ["a share without a percent", (b) => (cashShare(b).percent = null), "a holding share needs a holdingId and a percent"],
+      ["a share that also has an account", (b) => (cashShare(b).accountId = BANK), "a cash allocation needs an accountId and an amount, and no holdingId or percent"],
+      ["a share that also has an amount", (b) => (cashShare(b).amount = 100), "a holding share needs a holdingId and a percent above 0 and up to 1, and no accountId or amount"],
+      ["a cash allocation that also has a holding", (b) => (alloc0(b).holdingId = CLOUD), "a cash allocation needs an accountId and an amount, and no holdingId or percent"],
+      ["a cash allocation that also has a percent", (b) => (alloc0(b).percent = 0.5), "a cash allocation needs an accountId and an amount, and no holdingId or percent"],
+      ["an allocation with neither shape", (b) => Object.assign(alloc0(b), { accountId: null, amount: null }), "a holding share needs a holdingId"],
+      ["a share of an unknown holding", (b) => (cashShare(b).holdingId = id(99)), "goalAllocations[2].holdingId: refers to a holding that is not in the file"],
+      ["the same goal and holding twice", (b) => (b.goalAllocations[3].goalId = EMERGENCY), "goalAllocations (goal and holding): appears twice"],
+      ["shares that add up to a millionth over 100%", (b) => (b.goalAllocations[3].percent = 0.750001), "the shares of holding"],
+    ]);
+
+    it("accepts shares that add up to exactly 100%, and a lone share of 100%", () => {
+      const b = valid();
+      expect(cashShare(b).percent).toBe(0.25);
+      expect(b.goalAllocations[3].percent).toBe(0.75);
+      expect(parseBackup(b).ok).toBe(true);
+      b.goalAllocations.splice(3, 1);
+      cashShare(b).percent = 1;
+      expect(parseBackup(b).ok).toBe(true);
+    });
+
+    it("counts shares of different holdings separately", () => {
+      const b = valid();
+      b.goalAllocations[3].holdingId = GOLD;
+      expect(parseBackup(b).ok).toBe(true);
+    });
+  });
+
+  describe("goal share events (goal_allocation_events_shape_check)", () => {
+    rejects([
+      ["a holding event without a percent change", (b) => (shareEvent(b).percentDelta = null), "an event needs an accountId, or a holdingId with a percentDelta that is not zero"],
+      ["a holding event with a zero percent change", (b) => (shareEvent(b).percentDelta = 0), "an event needs an accountId, or a holdingId with a percentDelta that is not zero"],
+      ["an event with neither account nor holding", (b) => (shareEvent(b).holdingId = null), "an event needs an accountId, or a holdingId"],
+      ["an account event that also has a holding", (b) => (event0(b).holdingId = CLOUD), "an account event has no holdingId or percentDelta"],
+      ["an account event that also has a percent change", (b) => (event0(b).percentDelta = 0.1), "an account event has no holdingId or percentDelta"],
+      ["a holding event with an account", (b) => (shareEvent(b).accountId = BANK), "an account event has no holdingId or percentDelta"],
+      ["a holding event of an unknown holding", (b) => (shareEvent(b).holdingId = id(99)), "goalAllocationEvents[3].holdingId: refers to a holding that is not in the file"],
+      ["a holding event with an EGP value of zero", (b) => (shareEvent(b).delta = 0), "goalAllocationEvents[3].delta: must not be zero"],
+      ["a percent change with 7 decimals", (b) => (shareEvent(b).percentDelta = 0.1234567), "goalAllocationEvents[3].percentDelta: must have at most 6 decimals"],
+    ]);
+
+    it("accepts a negative percent change (a share that was lowered)", () => {
+      const b = valid();
+      Object.assign(shareEvent(b), { percentDelta: -0.1, delta: -150_000 });
+      expect(parseBackup(b).ok).toBe(true);
     });
   });
 });

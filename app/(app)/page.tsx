@@ -56,11 +56,12 @@ export default async function Home() {
     accounts.filter((a) => a.isInvestment === investment).reduce((sum, a) => sum + (balances.get(a.id) ?? 0), 0);
   const cash = sumOf(false);
   const investmentCash = sumOf(true);
-  const investments = netWorth({ cash: investmentCash, holdings: inv.total, liabilities: 0 });
+  const investments = netWorth({ cash: investmentCash, holdings: inv.totals.all, liabilities: 0 });
+  const loans = inv.wealth.liabilitiesTotal;
   // Archived accounts still hold money, so they stay in net worth; only the list below hides them.
-  const total = netWorth({ cash: cash + investmentCash, holdings: inv.total, liabilities: 0 });
-  const heldIn = holdingsByAccount(inv.views);
-  const activeHoldings = inv.views.filter((v) => !v.row.archivedAt);
+  const total = netWorth({ cash: cash + investmentCash, holdings: inv.totals.all, liabilities: loans });
+  const heldIn = holdingsByAccount(inv);
+  const hasHoldings = inv.views.some((v) => !v.row.archivedAt) || inv.clouds.some((c) => !c.row.archivedAt);
   const archivedCount = accounts.filter((a) => a.archivedAt).length;
 
   const { start, end } = financialMonth(today, settings.monthStartDay);
@@ -68,7 +69,7 @@ export default async function Home() {
   const percent = month.savingsRate === null ? null : Math.round(month.savingsRate * 100);
   const rate = percent === null ? "—" : `${percent < 0 ? "−" : ""}${Math.abs(percent)}%`;
 
-  const goalData = await loadGoalData(userId, { accounts, txRows, monthStartDay: settings.monthStartDay });
+  const goalData = await loadGoalData(userId, { accounts, txRows, monthStartDay: settings.monthStartDay, wealth: inv.wealth });
   const activeGoals = goalData.goals.filter((v) => !v.goal.archivedAt);
   const fundedRules = goalData.rules.filter((r) => r.outcome);
 
@@ -89,19 +90,33 @@ export default async function Home() {
             <dt className="text-sm text-muted">Investments</dt>
             <dd className="font-medium">
               <Amount value={investments} />
-              {inv.views.length > 0 && (
+              {hasHoldings && (
                 <span className="block text-sm font-normal text-muted">
-                  Holdings <Amount value={inv.total} /> + cash <Amount value={investmentCash} />
+                  Holdings <Amount value={inv.totals.all} /> + cash <Amount value={investmentCash} />
                 </span>
               )}
             </dd>
           </div>
+          {loans > 0 && (
+            <div className="col-span-2 border-l-2 border-negative pl-3">
+              <dt className="text-sm text-muted">Loans and money you owe</dt>
+              <dd className="font-medium">
+                −<Amount value={loans} />
+                <Link href="/more/liabilities" className="ml-3 inline-flex min-h-11 items-center text-sm font-normal underline">
+                  Open loans
+                </Link>
+              </dd>
+            </div>
+          )}
         </dl>
+        {(hasHoldings || loans > 0) && (
+          <p className="mt-3 text-sm text-muted">Net worth = everyday accounts + investments − loans.</p>
+        )}
         {inv.stale && (
           <p className="mt-3 text-sm text-negative">
-            ▲ Includes values last updated more than {inv.staleDays} days ago, or never updated.{" "}
+            ▲ Out of date: {inv.staleKinds.join(", ")}. Net worth includes values that may no longer be right.{" "}
             <Link href="/investments" className="underline">
-              Update prices
+              Update them
             </Link>
           </p>
         )}
@@ -136,22 +151,32 @@ export default async function Home() {
         <div className="flex items-baseline justify-between gap-3">
           <h2 className="text-lg font-semibold tracking-tight">Portfolio</h2>
           <Link href="/investments" className="inline-flex min-h-11 items-center text-sm underline">
-            {activeHoldings.length > 0 ? "Open" : "Add a holding"}
+            {hasHoldings ? "Open" : "Add a holding"}
           </Link>
         </div>
-        {activeHoldings.length === 0 ? (
+        {!hasHoldings ? (
           <p className="text-muted">No holdings yet.</p>
         ) : (
-          <>
-            <dl className="mt-1 grid grid-cols-2 gap-x-4 gap-y-5">
-              <Stat label="Holdings value">
-                <Amount value={inv.total} />
-              </Stat>
-              <Stat label="Profit or loss on what you hold">
-                <HoldingPL value={inv.unrealized} />
-              </Stat>
-            </dl>
-          </>
+          <dl className="mt-1 grid grid-cols-2 gap-x-4 gap-y-5">
+            <Stat label="Stocks & funds">
+              <Amount value={inv.totals.stocks} />
+            </Stat>
+            <Stat label="Gold">
+              <Amount value={inv.totals.gold} />
+            </Stat>
+            <Stat label="Savings Clouds (estimated)">
+              <Amount value={inv.totals.clouds} />
+            </Stat>
+            <Stat label="Cash in investment accounts">
+              <Amount value={investmentCash} />
+            </Stat>
+            <Stat label="Profit or loss on stocks, funds and gold">
+              <HoldingPL value={inv.unrealized} />
+            </Stat>
+            <Stat label="Cloud growth so far (estimated)">
+              <HoldingPL value={inv.cloudGrowth} />
+            </Stat>
+          </dl>
         )}
       </section>
 

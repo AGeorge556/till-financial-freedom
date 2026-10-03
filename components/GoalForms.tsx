@@ -2,11 +2,12 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import { setAllocation } from "@/app/actions/allocations";
+import { setAllocation, setHoldingShare } from "@/app/actions/allocations";
 import { archiveGoal, createGoal, unarchiveGoal, updateGoal } from "@/app/actions/goals";
 import { Amount } from "./Amount";
 import { Form } from "./Form";
-import { egpText, ratePercentText } from "./GoalFormat";
+import { egpText, ratePercentText, sharePercentText } from "./GoalFormat";
+import { KIND_LABEL } from "./HoldingFormat";
 import { GoalSheet } from "./GoalSheet";
 import { Field, field, primaryBtn, secondaryBtn } from "./ui";
 
@@ -227,6 +228,77 @@ export function AllocationForm({ goalId, accounts }: { goalId: string; accounts:
           </Field>
           <button type="submit" disabled={pending} className={`mt-4 ${primaryBtn}`}>
             {pending ? "Saving…" : "Save allocation"}
+          </button>
+          {saved && (
+            <p role="status" className="mt-3 text-positive">
+              Saved.
+            </p>
+          )}
+        </>
+      )}
+    </Form>
+  );
+}
+
+export type ShareHolding = {
+  id: string;
+  name: string;
+  kind: keyof typeof KIND_LABEL;
+  archived: boolean;
+  value: number;
+  /** This goal's share now, a decimal fraction string ("0" = none). */
+  current: string;
+  /** The part of the holding no goal has claimed, a decimal fraction string. */
+  freeShare: string;
+};
+
+/** Earmarks a percentage of a holding for the goal. setHoldingShare takes the NEW share for the pair; 0 releases it. */
+export function HoldingShareForm({ goalId, holdings }: { goalId: string; holdings: ShareHolding[] }) {
+  const [holdingId, setHoldingId] = useState(holdings.find((h) => !h.archived)?.id ?? holdings[0]?.id ?? "");
+  const [saves, setSaves] = useState(0);
+  const selected = holdings.find((h) => h.id === holdingId);
+
+  if (holdings.length === 0) {
+    return (
+      <p className="text-muted">
+        You have no holdings to fund this goal from.{" "}
+        <Link href="/investments" className="underline">
+          Add one in Investments
+        </Link>
+        .
+      </p>
+    );
+  }
+
+  return (
+    <Form action={setHoldingShare} onSuccess={() => setSaves((n) => n + 1)}>
+      {({ pending, saved }) => (
+        <>
+          <input type="hidden" name="goalId" value={goalId} />
+          <p className="mb-4 text-sm text-muted">
+            This earmarks a share of a holding for the goal. It does not move money: your balances and net worth stay the
+            same. The goal&apos;s value follows the holding&apos;s value, up and down.
+          </p>
+          <Field label="Holding">
+            <select name="holdingId" value={holdingId} onChange={(e) => setHoldingId(e.target.value)} className={field}>
+              {holdings.map((h) => (
+                <option key={h.id} value={h.id}>
+                  {h.name} ({KIND_LABEL[h.kind].toLowerCase()}){h.archived ? " (archived)" : ""}
+                </option>
+              ))}
+            </select>
+          </Field>
+          {selected && (
+            <p className="mt-2 text-sm text-muted">
+              Worth <Amount value={selected.value} /> now. This goal has {sharePercentText(selected.current)}%. Not claimed by
+              any goal: {sharePercentText(selected.freeShare)}%.
+            </p>
+          )}
+          <Field label="New share of this holding for the goal (%, 0 to release it)" className="mt-4">
+            <input key={saves} name="percent" inputMode="decimal" autoComplete="off" placeholder="0" required className={field} />
+          </Field>
+          <button type="submit" disabled={pending} className={`mt-4 ${primaryBtn}`}>
+            {pending ? "Saving…" : "Save share"}
           </button>
           {saved && (
             <p role="status" className="mt-3 text-positive">

@@ -8,6 +8,7 @@ import { requireUserId } from "@/lib/auth";
 import { parseEGP } from "@/lib/finance-core/money";
 import { cairoToday } from "@/lib/finance-core/time";
 import { voidInvestmentTransaction } from "./investments";
+import { voidPayment } from "./liabilities";
 import { type ActionState, id, isRealDate, str } from "./shared";
 
 const NOT_FOUND = "Transaction not found.";
@@ -119,7 +120,10 @@ export async function editTransaction(_prev: ActionState, formData: FormData): P
       .where(and(eq(transactions.id, txId), eq(transactions.userId, userId)))
       .for("update");
     if (!old) return NOT_FOUND;
-    if (old.holdingId) return "Buys, sells and dividends cannot be edited. Void it and enter the corrected one from the holding.";
+    if (old.holdingId) {
+      return "Buys, sells, dividends, deposits and withdrawals cannot be edited. Void it and enter the corrected one from the holding.";
+    }
+    if (old.liabilityId) return "A loan payment cannot be edited. Void it and enter the corrected one from the loan.";
     if (!isKind(old.type) || old.status === "void") return "This transaction cannot be edited.";
 
     const fields = parseFields(old.type, formData);
@@ -140,12 +144,14 @@ export async function voidTransaction(_prev: ActionState, formData: FormData): P
   const txId = id(formData, "id");
   if (!txId) return { error: NOT_FOUND };
 
-  // A holding's rows must pass the position check (rule F) before they are voided.
+  // A holding's rows must pass the position check (rule F), a cloud's the value check, and a loan payment's two
+  // rows (principal and interest) are voided together, before anything is voided.
   const [row] = await db
-    .select({ holdingId: transactions.holdingId })
+    .select({ holdingId: transactions.holdingId, liabilityId: transactions.liabilityId })
     .from(transactions)
     .where(and(eq(transactions.id, txId), eq(transactions.userId, userId)));
   if (row?.holdingId) return voidInvestmentTransaction(_prev, formData);
+  if (row?.liabilityId) return voidPayment(_prev, formData);
 
   const voided = await db
     .update(transactions)

@@ -40,3 +40,12 @@ export function ruleTargetName(targetKind: "goal" | "investments" | "cash", goal
   if (targetKind === "goal") return goalName ?? "A goal";
   return targetKind === "investments" ? "Investments (not tied to a goal)" : "Cash savings (not tied to a goal)";
 }
+
+/** A stored share ("0.25", "-0.125") as a person reads and types it: "25", "-12.5". String work only, never a float. */
+export function sharePercentText(share: string): string {
+  const sign = share.startsWith("-") ? "-" : "";
+  const [whole, frac = ""] = share.replace("-", "").split(".");
+  const micro = (whole + frac.padEnd(6, "0")).replace(/^0+/, "").padStart(5, "0"); // share x 1,000,000
+  const decimals = micro.slice(-4).replace(/0+$/, "");
+  return `${sign}${micro.slice(0, -4)}${decimals ? `.${decimals}` : ""}`;
+}

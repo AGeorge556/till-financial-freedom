@@ -8,13 +8,18 @@ import {
   allocationOverrides,
   allocationRules,
   categories,
+  cloudConfirmations,
   corporateActions,
   financialAssumptions,
   goalAllocationEvents,
   goalAllocations,
   goals,
+  goldPrices,
   holdings,
+  liabilities,
+  liabilityUpdates,
   priceUpdates,
+  rateHistory,
   transactions,
   userSettings,
 } from "@/db/schema";
@@ -23,7 +28,15 @@ import { insertOrder, parseBackup } from "@/lib/backup";
 
 export type ImportState = {
   error?: string;
-  imported?: { accounts: number; categories: number; transactions: number; goals: number; rules: number; holdings: number };
+  imported?: {
+    accounts: number;
+    categories: number;
+    transactions: number;
+    goals: number;
+    rules: number;
+    holdings: number;
+    liabilities: number;
+  };
 };
 
 const MAX_BYTES = 5 * 1024 * 1024;
@@ -75,7 +88,10 @@ export async function importBackup(_prev: ImportState, formData: FormData): Prom
       const [t] = await tx.select({ n: count() }).from(transactions).where(eq(transactions.userId, userId));
       const [g] = await tx.select({ n: count() }).from(goals).where(eq(goals.userId, userId));
       const [r] = await tx.select({ n: count() }).from(allocationRules).where(eq(allocationRules.userId, userId));
-      if (a.n + c.n + t.n + g.n + r.n > 0) {
+      // Liabilities and gold prices belong to no account, so an account-less user can still own them.
+      const [l] = await tx.select({ n: count() }).from(liabilities).where(eq(liabilities.userId, userId));
+      const [gp] = await tx.select({ n: count() }).from(goldPrices).where(eq(goldPrices.userId, userId));
+      if (a.n + c.n + t.n + g.n + r.n + l.n + gp.n > 0) {
         throw new Refused(
           "Nothing was restored. A backup can only be restored into an empty account; this one already has data.",
         );
@@ -97,7 +113,20 @@ export async function importBackup(_prev: ImportState, formData: FormData): Prom
           .insert(categories)
           .values(part.map((r) => ({ ...r, userId, archivedAt: when(r.archivedAt), createdAt: new Date(r.createdAt) })));
       }
-      // Dependency order: holdings need accounts; transactions, price updates and corporate actions need holdings.
+      // Dependency order: liabilities and holdings first (holdings need accounts); transactions need both, and the
+      // updates, prices, rates, confirmations and corporate actions need their holding or liability.
+      for (const part of chunks(b.liabilities)) {
+        await tx.insert(liabilities).values(
+          part.map((r) => ({
+            ...r,
+            userId,
+            interestRate: rateText(r.interestRate),
+            archivedAt: when(r.archivedAt),
+            createdAt: new Date(r.createdAt),
+            updatedAt: new Date(r.updatedAt),
+          })),
+        );
+      }
       for (const part of chunks(b.holdings)) {
         await tx.insert(holdings).values(
           part.map((r) => ({
@@ -121,6 +150,20 @@ export async function importBackup(_prev: ImportState, formData: FormData): Prom
       for (const part of chunks(b.corporateActions)) {
         await tx.insert(corporateActions).values(part.map((r) => ({ ...r, userId, createdAt: new Date(r.createdAt) })));
       }
+      for (const part of chunks(b.liabilityUpdates)) {
+        await tx.insert(liabilityUpdates).values(part.map((r) => ({ ...r, userId, createdAt: new Date(r.createdAt) })));
+      }
+      for (const part of chunks(b.goldPrices)) {
+        await tx.insert(goldPrices).values(part.map((r) => ({ ...r, userId, createdAt: new Date(r.createdAt) })));
+      }
+      for (const part of chunks(b.rateHistory)) {
+        await tx
+          .insert(rateHistory)
+          .values(part.map((r) => ({ ...r, userId, apy: r.apy.toFixed(6), createdAt: new Date(r.createdAt) })));
+      }
+      for (const part of chunks(b.cloudConfirmations)) {
+        await tx.insert(cloudConfirmations).values(part.map((r) => ({ ...r, userId, createdAt: new Date(r.createdAt) })));
+      }
       const assumptions = Object.fromEntries(Object.entries(b.assumptions).map(([k, v]) => [k, rateText(v)]));
       await tx
         .insert(financialAssumptions)
@@ -142,10 +185,20 @@ export async function importBackup(_prev: ImportState, formData: FormData): Prom
       for (const part of chunks(b.goalAllocations)) {
         await tx
           .insert(goalAllocations)
-          .values(part.map((r) => ({ ...r, userId, createdAt: new Date(r.createdAt), updatedAt: new Date(r.updatedAt) })));
+          .values(
+            part.map((r) => ({
+              ...r,
+              userId,
+              percent: rateText(r.percent),
+              createdAt: new Date(r.createdAt),
+              updatedAt: new Date(r.updatedAt),
+            })),
+          );
       }
       for (const part of chunks(b.goalAllocationEvents)) {
-        await tx.insert(goalAllocationEvents).values(part.map((r) => ({ ...r, userId, createdAt: new Date(r.createdAt) })));
+        await tx
+          .insert(goalAllocationEvents)
+          .values(part.map((r) => ({ ...r, userId, percentDelta: rateText(r.percentDelta), createdAt: new Date(r.createdAt) })));
       }
       for (const part of chunks(b.allocationRules)) {
         await tx
@@ -175,6 +228,7 @@ export async function importBackup(_prev: ImportState, formData: FormData): Prom
       goals: b.goals.length,
       rules: b.allocationRules.length,
       holdings: b.holdings.length,
+      liabilities: b.liabilities.length,
     },
   };
 }

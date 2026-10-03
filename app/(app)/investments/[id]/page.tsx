@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import type { ReactNode } from "react";
 import { Amount } from "@/components/Amount";
 import { dateText, KIND_LABEL, plain, updatedText } from "@/components/HoldingFormat";
 import {
@@ -12,42 +11,21 @@ import {
   TradeForm,
 } from "@/components/HoldingForms";
 import { HoldingHistory } from "@/components/HoldingHistory";
+import { Panel, Row, StaleBadge } from "@/components/HoldingParts";
 import { HoldingPL } from "@/components/HoldingPL";
 import { HoldingPrivate } from "@/components/HoldingPrivate";
 import { BackLink, card } from "@/components/ui";
 import { listAccounts } from "@/db/queries";
 import { requireUserId } from "@/lib/auth";
 import { cairoToday } from "@/lib/finance-core/time";
+import { CloudDetail } from "./CloudDetail";
+import { GoldDetail } from "./GoldDetail";
 import { holdingHistory, loadInvestments } from "../data";
 
 export const metadata: Metadata = { title: "Holding" };
 
 // Postgres throws on a malformed uuid, so reject those before querying.
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-function Row({ label, hint, children }: { label: string; hint?: ReactNode; children: ReactNode }) {
-  return (
-    <div className="flex items-baseline justify-between gap-4 py-2">
-      <dt className="text-sm text-muted">{label}</dt>
-      <dd className="text-right font-medium">
-        {children}
-        {hint && <span className="block text-sm font-normal text-muted">{hint}</span>}
-      </dd>
-    </div>
-  );
-}
-
-function Panel({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
-  return (
-    <details className={card}>
-      <summary className="flex min-h-14 cursor-pointer items-center px-5 font-semibold">{title}</summary>
-      <div className="border-t border-border p-5">
-        {hint && <p className="mb-4 text-sm text-muted">{hint}</p>}
-        {children}
-      </div>
-    </details>
-  );
-}
 
 export default async function Page({ params }: { params: Promise<{ id: string }> }) {
   const userId = await requireUserId();
@@ -56,15 +34,31 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
 
   const today = cairoToday();
   const [inv, accounts] = await Promise.all([loadInvestments(userId, today), listAccounts(userId, { includeArchived: true })]);
+  const cloud = inv.clouds.find((c) => c.row.id === id);
   const view = inv.views.find((v) => v.row.id === id);
+  const row = cloud?.row ?? view?.row;
+  if (!row) notFound();
+  const cashAccounts = accounts.filter((a) => !a.archivedAt).map((a) => ({ id: a.id, name: a.name, archived: false }));
+  const accountName = accounts.find((a) => a.id === row.accountId)?.name ?? "an account";
+  const history = holdingHistory(inv.portfolio, id, row.priceUpdates);
+  if (cloud) return <CloudDetail view={cloud} accountName={accountName} cashAccounts={cashAccounts} today={today} history={history} />;
   if (!view) notFound();
-  const { row, state } = view;
+  if (row.kind === "gold") {
+    return (
+      <GoldDetail
+        view={view}
+        accountName={accountName}
+        cashAccounts={cashAccounts}
+        mode={inv.portfolio.settings.goldPriceMode}
+        today={today}
+        history={history}
+      />
+    );
+  }
+  const { state } = view;
   const archived = row.archivedAt !== null;
   const held = state.quantity !== "0";
-  const account = accounts.find((a) => a.id === row.accountId);
-  const cashAccounts = accounts.filter((a) => !a.archivedAt).map((a) => ({ id: a.id, name: a.name, archived: false }));
-  const option = { id: row.id, name: row.name, ticker: row.ticker, accountId: row.accountId };
-  const history = holdingHistory(inv.portfolio, id, row.priceUpdates);
+  const option = { id: row.id, name: row.name, ticker: row.ticker, accountId: row.accountId, kind: row.kind };
 
   return (
     <>
@@ -72,7 +66,7 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
       <h1 className="text-3xl font-semibold tracking-tight">{row.name}</h1>
       <p className="mt-1 text-muted">
         {KIND_LABEL[row.kind]}
-        {row.ticker ? ` · ${row.ticker}` : ""} · Held in {account?.name ?? "an account"}
+        {row.ticker ? ` · ${row.ticker}` : ""} · Held in {accountName}
         {archived ? " · Archived" : ""}
       </p>
       {row.notes && <p className="mt-2">{row.notes}</p>}
@@ -82,9 +76,7 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
         <Amount value={view.value} showPiasters className="mt-1 block text-4xl font-semibold tracking-tight text-investments" />
         <p className="mt-1 text-sm text-muted">
           {updatedText(view.source, view.days)}
-          {view.stale && (
-            <span className="ml-2 rounded-full border border-negative px-2 py-0.5 text-xs font-medium text-negative">▲ Stale</span>
-          )}
+          {view.stale && <StaleBadge />}
         </p>
         <dl className="mt-3 divide-y divide-border border-t border-border">
           <Row label="Units held">

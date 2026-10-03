@@ -10,19 +10,21 @@ import {
   sellHolding,
   voidInvestmentTransaction,
 } from "@/app/actions/investments";
+import { KARATS } from "@/lib/finance-core/gold";
 import { parseEGP, type Piasters } from "@/lib/finance-core/money";
 import { dividendCash, purchaseCash, saleCash } from "@/lib/finance-core/portfolio";
 import { Amount } from "./Amount";
 import { Form } from "./Form";
-import { KIND_LABEL } from "./HoldingFormat";
+import { GOLD_FORM_LABEL, KIND_LABEL } from "./HoldingFormat";
 import type { AccountOption } from "./TransactionForm";
 import { Field, field, primaryBtn, secondaryBtn } from "./ui";
 
-export type HoldingOption = { id: string; name: string; ticker: string | null; accountId: string };
+/** `kind` is optional so older callers keep working; without it a holding is treated as unit-based. */
+export type HoldingOption = { id: string; name: string; ticker: string | null; accountId: string; kind?: keyof typeof KIND_LABEL };
 
 const holdingLabel = (h: HoldingOption) => (h.ticker ? `${h.name} (${h.ticker})` : h.name);
 
-const Saved = ({ show, children }: { show: boolean; children: ReactNode }) =>
+export const Saved = ({ show, children }: { show: boolean; children: ReactNode }) =>
   show && (
     <p role="status" className="mt-3 text-positive">
       {children}
@@ -53,7 +55,7 @@ function HoldingPicker({
   );
 }
 
-const decimalInput = { inputMode: "decimal", autoComplete: "off" } as const;
+export const decimalInput = { inputMode: "decimal", autoComplete: "off" } as const;
 
 /** Piasters from a typed amount: blank is 0, not an amount is null. Same parser the server action uses. */
 const optionalMoney = (text: string): Piasters | null => (text.trim() === "" ? 0 : parseEGP(text));
@@ -89,6 +91,7 @@ export function TradeForm({
   const buy = side === "buy";
   const [holdingId, setHoldingId] = useState(holdings[0].id);
   const holding = holdings.find((h) => h.id === holdingId) ?? holdings[0];
+  const gold = holding.kind === "gold";
   // Cash defaults to the holding's own account (Thndr); picking another account sticks until the holding changes.
   const [pickedAccount, setPickedAccount] = useState<string | null>(null);
   const wanted = pickedAccount ?? holding.accountId;
@@ -126,7 +129,7 @@ export function TradeForm({
               setPickedAccount(null);
             }}
           />
-          <Field label="Quantity" className={holdings.length > 1 ? "mt-4" : ""}>
+          <Field label={gold ? "Weight (grams)" : "Quantity"} className={holdings.length > 1 ? "mt-4" : ""}>
             <input
               name="quantity"
               {...decimalInput}
@@ -139,7 +142,7 @@ export function TradeForm({
               className={field}
             />
           </Field>
-          <Field label="Price per unit (EGP)" className="mt-4">
+          <Field label={gold ? (buy ? "Metal price per gram (EGP)" : "Price per gram (EGP)") : "Price per unit (EGP)"} className="mt-4">
             <input
               name="unitPrice"
               {...decimalInput}
@@ -150,9 +153,15 @@ export function TradeForm({
               className={field}
             />
           </Field>
-          <Field label="Fee (EGP, optional)" className="mt-4">
+          <Field label={gold && buy ? "Workmanship fee (EGP, optional)" : "Fee (EGP, optional)"} className="mt-4">
             <input name="fee" {...decimalInput} placeholder="0" value={fee} onChange={(e) => setFee(e.target.value)} className={field} />
           </Field>
+          {gold && buy && (
+            <p className="mt-2 text-sm text-muted">
+              Workmanship is part of what the piece cost you. It is not spending, and the piece is valued at the buy-back
+              price, so it shows that much as a loss at first.
+            </p>
+          )}
           {!buy && (
             <Field label="Tax withheld (EGP, optional)" className="mt-4">
               <input
@@ -171,7 +180,7 @@ export function TradeForm({
                 <span className="text-muted">{buy ? "You will pay " : "You will receive "}</span>
                 <Amount value={cash} showPiasters className="font-semibold" />
                 <span className="text-sm text-muted">
-                  {buy ? " (the fee is added to your cost, it is not spending)" : " (after fee and tax)"}
+                  {buy ? ` (${gold ? "workmanship" : "the fee"} is added to your cost, it is not spending)` : " (after fee and tax)"}
                 </span>
               </>
             )}
@@ -314,27 +323,32 @@ const ACTION_HINT = {
 } as const;
 type ActionKind = keyof typeof ACTION_HINT;
 
-export function CorporateActionForm({ holdingId, today }: { holdingId: string; today: string }) {
-  // BONUS is first, so it is what a form reset returns the select to.
-  const [kind, setKind] = useState<ActionKind>("BONUS");
+export function CorporateActionForm({ holdingId, today, writeOffOnly }: { holdingId: string; today: string; writeOffOnly?: boolean }) {
+  // BONUS is first, so it is what a form reset returns the select to (a write-off-only form has no select).
+  const first: ActionKind = writeOffOnly ? "WRITE_OFF" : "BONUS";
+  const [kind, setKind] = useState<ActionKind>(first);
   return (
     <Form
       action={addCorporateAction}
       reset
-      onSuccess={() => setKind("BONUS")}
+      onSuccess={() => setKind(first)}
       confirm={kind === "WRITE_OFF" ? "Write this holding off? It cannot be undone, but you can record a purchase later." : undefined}
     >
       {({ pending, saved }) => (
         <>
           <input type="hidden" name="holdingId" value={holdingId} />
-          <Field label="What happened">
-            <select name="kind" value={kind} onChange={(e) => setKind(e.target.value as ActionKind)} className={field}>
-              <option value="BONUS">Bonus units</option>
-              <option value="SPLIT">Split</option>
-              <option value="WRITE_OFF">Write-off</option>
-            </select>
-          </Field>
-          <p className="mt-2 text-sm text-muted">{ACTION_HINT[kind]}</p>
+          {writeOffOnly ? (
+            <input type="hidden" name="kind" value="WRITE_OFF" />
+          ) : (
+            <Field label="What happened">
+              <select name="kind" value={kind} onChange={(e) => setKind(e.target.value as ActionKind)} className={field}>
+                <option value="BONUS">Bonus units</option>
+                <option value="SPLIT">Split</option>
+                <option value="WRITE_OFF">Write-off</option>
+              </select>
+            </Field>
+          )}
+          <p className="mt-2 text-sm text-muted">{writeOffOnly ? "Lost or worthless. Grams and cost go to zero, and the remaining cost is recorded as a loss." : ACTION_HINT[kind]}</p>
           {kind === "BONUS" && (
             <Field label="Bonus units received" className="mt-4">
               <input name="quantity" {...decimalInput} required placeholder="0" className={field} />
@@ -361,24 +375,78 @@ export function CorporateActionForm({ holdingId, today }: { holdingId: string; t
   );
 }
 
-export function AddHoldingForm({ accounts }: { accounts: { id: string; name: string }[] }) {
+export function AddHoldingForm({ accounts, today }: { accounts: { id: string; name: string }[]; today: string }) {
+  const [kind, setKind] = useState<keyof typeof KIND_LABEL>("stock");
+  const gold = kind === "gold";
+  const cloud = kind === "cloud";
   return (
-    <Form action={createHolding} reset>
+    <Form action={createHolding} reset onSuccess={() => setKind("stock")}>
       {({ pending, saved }) => (
         <>
-          <Field label="Name">
-            <input name="name" required maxLength={80} autoComplete="off" className={field} />
-          </Field>
-          <Field label="Ticker (optional)" className="mt-4">
-            <input name="ticker" maxLength={20} autoComplete="off" autoCapitalize="characters" className={field} />
-          </Field>
-          <Field label="Type" className="mt-4">
-            <select name="kind" className={field}>
+          <Field label="Type">
+            <select name="kind" value={kind} onChange={(e) => setKind(e.target.value as keyof typeof KIND_LABEL)} className={field}>
               <option value="stock">{KIND_LABEL.stock}</option>
-              <option value="fund">{KIND_LABEL.fund} (a gold fund is a fund)</option>
+              <option value="fund">{KIND_LABEL.fund} (a gold fund bought on a broker is a fund)</option>
+              <option value="gold">Gold you hold (bars, coins, jewelry)</option>
+              <option value="cloud">{KIND_LABEL.cloud}</option>
               <option value="other">{KIND_LABEL.other}</option>
             </select>
           </Field>
+          <Field label="Name" className="mt-4">
+            <input name="name" required maxLength={80} autoComplete="off" className={field} />
+          </Field>
+          {!gold && !cloud && (
+            <Field label="Ticker (optional)" className="mt-4">
+              <input name="ticker" maxLength={20} autoComplete="off" autoCapitalize="characters" className={field} />
+            </Field>
+          )}
+          {gold && (
+            <>
+              <Field label="Karat" className="mt-4">
+                <select name="karat" defaultValue="21" className={field}>
+                  {KARATS.map((k) => (
+                    <option key={k} value={k}>
+                      {k}K
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Form" className="mt-4">
+                <select name="form" defaultValue="bar" className={field}>
+                  {Object.entries(GOLD_FORM_LABEL).map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <p className="mt-2 text-sm text-muted">The karat cannot be changed later. Add one holding per karat.</p>
+            </>
+          )}
+          {cloud && (
+            <>
+              <Field label="Start date" className="mt-4">
+                <input type="date" name="startDate" required defaultValue={today} className={field} />
+              </Field>
+              <Field label="Maturity date (optional)" className="mt-4">
+                <input type="date" name="maturityDate" className={field} />
+              </Field>
+              <Field label="Planned contribution (EGP, optional)" className="mt-4">
+                <input name="contributionAmount" {...decimalInput} placeholder="0" className={field} />
+              </Field>
+              <Field label="How often" className="mt-4">
+                <select name="contributionFrequency" defaultValue="" className={field}>
+                  <option value="">Not set</option>
+                  <option value="weekly">Every week</option>
+                  <option value="monthly">Every month</option>
+                </select>
+              </Field>
+              <p className="mt-2 text-sm text-muted">
+                The contribution is only used for the expected value. It does not record any money moving: record each
+                deposit yourself.
+              </p>
+            </>
+          )}
           <Field label="Held in" className="mt-4">
             <select name="accountId" required className={field}>
               {accounts.map((a) => (
@@ -394,14 +462,15 @@ export function AddHoldingForm({ accounts }: { accounts: { id: string; name: str
           <button type="submit" disabled={pending} className={`mt-6 ${primaryBtn}`}>
             {pending ? "Adding…" : "Add holding"}
           </button>
-          <Saved show={saved}>Holding added. Open it to record your first purchase.</Saved>
+          <Saved show={saved}>Holding added. Open it to record your first purchase or deposit.</Saved>
         </>
       )}
     </Form>
   );
 }
 
-export function HoldingEditForm({ id, name, ticker, notes }: { id: string; name: string; ticker: string | null; notes: string | null }) {
+/** `ticker` undefined hides the ticker field (gold and Savings Clouds have none). */
+export function HoldingEditForm({ id, name, ticker, notes }: { id: string; name: string; ticker?: string | null; notes: string | null }) {
   return (
     <Form action={updateHolding}>
       {({ pending, saved }) => (
@@ -410,9 +479,11 @@ export function HoldingEditForm({ id, name, ticker, notes }: { id: string; name:
           <Field label="Name">
             <input name="name" required maxLength={80} defaultValue={name} className={field} />
           </Field>
-          <Field label="Ticker (optional)" className="mt-4">
-            <input name="ticker" maxLength={20} defaultValue={ticker ?? ""} className={field} />
-          </Field>
+          {ticker !== undefined && (
+            <Field label="Ticker (optional)" className="mt-4">
+              <input name="ticker" maxLength={20} defaultValue={ticker ?? ""} className={field} />
+            </Field>
+          )}
           <Field label="Notes (optional, no amounts)" className="mt-4">
             <input name="notes" maxLength={1000} defaultValue={notes ?? ""} className={field} />
           </Field>

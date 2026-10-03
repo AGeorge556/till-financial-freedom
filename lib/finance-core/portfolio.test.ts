@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { type CashFlow, type RateChange, cloudLine } from "./clouds";
+import { type GoldPrice, goldPricesFor, goldPurchaseEvent } from "./gold";
 import { lineValue } from "./holdings";
+import { liabilityAdjustments, outstanding, totalLiabilities, validatePayment } from "./liabilities";
 import {
   accountBalance,
   filterByDateRange,
@@ -379,5 +382,184 @@ describe("reconciliation identity (rule J) with real positions and ledger", () =
     const startNW = netWorth({ cash: opening, holdings: egp(10_000), liabilities: 0 });
     const wrongMarket = marketChange(egp(10_000), egp(15_000), summary.invested); // ignores sale proceeds
     expect(reconcile(endNW - startNW, summary.savings, wrongMarket, 0).ok).toBe(false);
+  });
+});
+
+describe("a reverse split that rounds the quantity to zero", () => {
+  // 0.3 x 0.000001 = 0.0000003, below the 6th decimal
+  const events = [buy("2026-01-01", "0.3", "100"), split("2026-02-01", "0.000001")];
+
+  it("is refused while cost basis remains, pointing at a write-off", () => {
+    expect(() => replayHolding(events)).toThrow(RangeError);
+    expect(() => replayHolding(events)).toThrow(/write-off/);
+    expect(validateHistory(events)).toMatchObject({ ok: false, date: "2026-02-01", error: expect.stringContaining("write-off") });
+  });
+
+  it("is refused even when a later event would have hidden it", () => {
+    expect(validateHistory([...events, writeOff("2026-03-01")]).ok).toBe(false);
+  });
+
+  it("is allowed when there is no basis to lose (bonus shares only)", () => {
+    const s = replayHolding([bonus("2026-01-01", "0.000001"), split("2026-02-01", "0.4")]);
+    expect([s.quantity, s.costBasis]).toEqual(["0", 0]);
+  });
+
+  it("a reverse split that keeps at least one micro-unit is still fine", () => {
+    expect(replayHolding([buy("2026-01-01", "0.3", "100"), split("2026-02-01", "0.00002")]).quantity).toBe("0.000006");
+  });
+
+  it("a write-off is the way to clear it", () => {
+    const s = replayHolding([buy("2026-01-01", "0.3", "100"), writeOff("2026-02-01")]);
+    expect([s.quantity, s.costBasis, s.realizedPL]).toEqual(["0", 0, -egp(30)]);
+  });
+});
+
+describe("a sale needs positive net proceeds, exactly as the ledger row does", () => {
+  it.each([
+    ["fee equal to the gross", "1", "10", egp(10), 0],
+    ["tax equal to the gross", "1", "10", 0, egp(10)],
+    ["fee and tax together equal to the gross", "1", "10", egp(4), egp(6)],
+    ["fee above the gross", "1", "10", egp(11), 0],
+    ["a zero price", "1", "0", 0, 0],
+  ])("%s is refused by saleCash and by the replay", (_name, quantity, price, fee, tax) => {
+    expect(() => saleCash(quantity, price, fee, tax)).toThrow(RangeError);
+    const events = [buy("2026-01-01", "10", "10"), sell("2026-02-01", quantity, price, fee / 100, tax / 100)];
+    expect(() => replayHolding(events)).toThrow(RangeError);
+    expect(validateHistory(events)).toMatchObject({ ok: false, date: "2026-02-01" });
+  });
+
+  it("one piaster of net proceeds is accepted by both, and the replay books exactly that", () => {
+    const fee = egp(10) - 1;
+    expect(saleCash("1", "10", fee, 0)).toBe(1);
+    const s = replayHolding([buy("2026-01-01", "10", "10"), sell("2026-02-01", "1", "10", fee / 100)]);
+    expect(s.saleProceeds).toBe(1);
+    expect(s.realizedPL).toBe(1 - egp(10)); // sold 1 of 10 shares at cost 10
+  });
+
+  it("tax is still deducted from proceeds and realized P/L as before", () => {
+    const s = replayHolding([buy("2026-01-01", "100", "100"), sell("2026-02-01", "40", "150", 30, 20)]);
+    expect([s.saleProceeds, s.realizedPL]).toEqual([egp(5_950), egp(1_950)]);
+  });
+});
+
+describe("portfolioValue with gold and clouds", () => {
+  const cloud = (today: string, cashFlows: CashFlow[], rates: RateChange[] = []) =>
+    cloudLine({ id: "c", confirmations: [], cashFlows, rates, today });
+  const dep = (d: string, amountEgp: number): CashFlow => ({ ...at(d), kind: "deposit", amount: egp(amountEgp) });
+
+  it("cloud values are added to the total and counted stale", () => {
+    const stock = { id: "s", events: [buy("2026-03-09", "10", "100")], priceUpdates: [price("2026-03-09", "100")] };
+    const fresh = portfolioValue([stock], "2026-03-10", 7, []);
+    const c = cloud("2026-03-10", [dep("2026-03-01", 1_000)]); // never confirmed: stale
+    const both = portfolioValue([stock], "2026-03-10", 7, [c]);
+    expect(both.total).toBe(fresh.total + c.value);
+    expect(both.total).toBe(egp(2_000)); // 10 shares at 100 + a 1,000 cloud with no rate
+    expect(fresh.stale).toBe(false);
+    expect(both.stale).toBe(true);
+    expect(both.lines).toHaveLength(1); // clouds are not unit lines
+  });
+
+  it("a cloud alone is a portfolio", () => {
+    expect(portfolioValue([], "2026-03-10", 7, [cloud("2026-03-10", [dep("2026-03-01", 1_000)])]).total).toBe(egp(1_000));
+  });
+
+  it("a cloud's cash flows never enter the unit replay: a purchase with no quantity is refused", () => {
+    const cloudRow = { ...at("2026-01-01"), type: "purchase", fee: 0 } as unknown as HoldingEvent;
+    expect(() => replayHolding([cloudRow])).toThrow(RangeError);
+    const noPrice = { ...at("2026-01-01"), type: "purchase", quantity: "5", fee: 0 } as unknown as HoldingEvent;
+    expect(() => replayHolding([noPrice])).toThrow(RangeError);
+  });
+});
+
+describe("reconciliation identity (rule J) in a month with gold, a cloud, a loan payment and a liability update", () => {
+  const stamp = (date: string, n: number) => ({ date, createdAt: `2026-01-01T00:00:${String(n).padStart(2, "0")}Z` });
+
+  // 21K gold in derive_24k mode; the 24K buy-back price moves 4,000 -> 4,200
+  const goldPrices: GoldPrice[] = [
+    { ...stamp("2026-02-10", 0), karat: 24, price: "4000" },
+    { ...stamp("2026-03-31", 1), karat: 24, price: "4200" },
+  ];
+  const gold = {
+    id: "gold",
+    events: [
+      goldPurchaseEvent(stamp("2026-02-10", 2), "10", "3500", egp(500)),
+      goldPurchaseEvent(stamp("2026-03-12", 3), "5", "3600", egp(300)),
+    ],
+    priceUpdates: goldPricesFor(goldPrices, 21, "derive_24k"),
+    staleDays: 14,
+  };
+
+  // a Savings Cloud at 20% APY: 100,000 deposited in February, 20,000 in and 5,000 out in March
+  const cashFlows: CashFlow[] = [
+    { ...stamp("2026-02-01", 4), kind: "deposit", amount: egp(100_000) },
+    { ...stamp("2026-03-10", 5), kind: "deposit", amount: egp(20_000) },
+    { ...stamp("2026-03-20", 6), kind: "withdrawal", amount: egp(5_000) },
+  ];
+  const rates: RateChange[] = [{ ...stamp("2026-02-01", 7), apy: 0.2 }];
+  const holdingsAt = (date: string) =>
+    portfolioValue([gold], date, 7, [cloudLine({ id: "cloud", confirmations: [], cashFlows, rates, today: date })]).total;
+
+  // a loan of 50,000: 4,000 principal + 500 interest paid on 5 March, 3,000 more borrowed on 20 March (no cash)
+  const updates = [{ date: "2026-03-20", delta: egp(3_000) }];
+  const principal = [{ date: "2026-03-05", amount: egp(4_000) }];
+  const liabilitiesAt = (date: string) => totalLiabilities([outstanding(egp(50_000), updates, principal, date)]);
+
+  const opening = egp(300_000); // bank balance on 28 February
+  const tx = (t: Partial<Tx> & Pick<Tx, "type" | "amount" | "date">): Tx => ({ status: "posted", ...t });
+  const march: Tx[] = [
+    tx({ type: "INCOME", amount: egp(20_000), toAccountId: "bank", date: "2026-03-01" }),
+    tx({ type: "EXPENSE", amount: egp(6_000), fromAccountId: "bank", date: "2026-03-03" }),
+    tx({ type: "LIABILITY_PAYMENT", amount: egp(4_000), fromAccountId: "bank", date: "2026-03-05" }),
+    tx({ type: "EXPENSE", amount: egp(500), fromAccountId: "bank", date: "2026-03-05" }),
+    tx({ type: "INVESTMENT_PURCHASE", amount: egp(20_000), fromAccountId: "bank", date: "2026-03-10" }), // cloud deposit
+    tx({ type: "INVESTMENT_PURCHASE", amount: purchaseCash("5", "3600", egp(300)), fromAccountId: "bank", date: "2026-03-12" }), // gold
+    tx({ type: "INVESTMENT_SALE", amount: egp(5_000), toAccountId: "bank", date: "2026-03-20" }), // cloud withdrawal
+  ];
+  const range = { start: "2026-03-01", end: "2026-03-31" };
+
+  const figures = () => {
+    const summary = periodSummary(filterByDateRange(march, range.start, range.end));
+    const startHoldings = holdingsAt("2026-02-28");
+    const endHoldings = holdingsAt("2026-03-31");
+    const market = marketChange(startHoldings, endHoldings, summary.netInvested);
+    const startNW = netWorth({ cash: opening, holdings: startHoldings, liabilities: liabilitiesAt("2026-02-28") });
+    const endNW = netWorth({ cash: accountBalance(opening, "bank", march), holdings: endHoldings, liabilities: liabilitiesAt("2026-03-31") });
+    return { summary, startHoldings, endHoldings, market, change: endNW - startNW };
+  };
+
+  it("the loan payment was allowed and the month's pieces are what they should be", () => {
+    expect(validatePayment(egp(4_000), egp(500), outstanding(egp(50_000), updates, [], "2026-03-04"))).toEqual({ ok: true });
+    const f = figures();
+    expect(f.summary).toMatchObject({
+      spending: egp(6_500), // groceries + interest; the 4,000 principal is not spending
+      savings: egp(13_500),
+      liabilityPrincipalPaid: egp(4_000),
+      netInvested: egp(33_300), // 20,000 cloud + 18,300 gold (incl. 300 workmanship) - 5,000 cloud withdrawal
+    });
+    expect(f.startHoldings).toBe(egp(35_000) + 10_135_782); // 10 g x 3,500 + cloud 100,000 grown 27 days
+    expect(f.endHoldings).toBe(egp(55_125) + 11_812_289); // 15 g x 3,675 + cloud
+    expect(liabilitiesAt("2026-02-28")).toBe(egp(50_000));
+    expect(liabilitiesAt("2026-03-31")).toBe(egp(49_000));
+  });
+
+  it("net worth change = savings + market change + adjustments, with the liability update as an adjustment", () => {
+    const f = figures();
+    const adjustments = f.summary.adjustments + liabilityAdjustments(updates, range);
+    expect(adjustments).toBe(-egp(3_000));
+    expect(f.market).toBe(egp(1_825) + 176_507); // gold: 55,125 - 35,000 - 18,300; cloud: growth net of its 15,000 net deposits
+    expect(f.change).toBe(egp(14_090.07));
+    expect(reconcile(f.change, f.summary.savings, f.market, adjustments)).toEqual({ ok: true, difference: 0 });
+  });
+
+  it("leaving the liability update out breaks the identity by exactly its amount", () => {
+    const f = figures();
+    expect(reconcile(f.change, f.summary.savings, f.market, f.summary.adjustments)).toEqual({ ok: false, difference: -egp(3_000) });
+  });
+
+  it("treating the principal payment as spending would break it too", () => {
+    const f = figures();
+    const adjustments = f.summary.adjustments + liabilityAdjustments(updates, range);
+    const wrongSavings = f.summary.savings - egp(4_000);
+    expect(reconcile(f.change, wrongSavings, f.market, adjustments)).toEqual({ ok: false, difference: egp(4_000) });
   });
 });

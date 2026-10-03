@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { db } from "@/db";
-import { financialAssumptions, userSettings } from "@/db/schema";
+import { financialAssumptions, goldPriceMode, userSettings } from "@/db/schema";
 import { requireUserId } from "@/lib/auth";
 import { type ActionState, str } from "./shared";
 
@@ -54,18 +54,47 @@ export async function setAssumptions(_prev: ActionState, formData: FormData): Pr
   return {};
 }
 
+// user_settings may not exist yet, so these upsert, like settings.ts.
+async function saveSettings(userId: string, set: Partial<typeof userSettings.$inferInsert>): Promise<ActionState> {
+  await db
+    .insert(userSettings)
+    .values({ userId, ...set })
+    .onConflictDoUpdate({ target: userSettings.userId, set: { ...set, updatedAt: new Date() } });
+  revalidatePath("/", "layout");
+  return {};
+}
+
+function staleDaysFrom(formData: FormData): number | string {
+  const text = str(formData, "staleDays");
+  const days = /^\d{1,3}$/.test(text) ? Number(text) : 0;
+  return days < MIN_DAYS || days > MAX_DAYS ? `Enter a whole number of days from ${MIN_DAYS} to ${MAX_DAYS}.` : days;
+}
+
 /** A holding's price is stale when its latest update is older than this many days. */
 export async function setStaleDays(_prev: ActionState, formData: FormData): Promise<ActionState> {
   const userId = await requireUserId();
-  const text = str(formData, "staleDays");
-  const days = /^\d{1,3}$/.test(text) ? Number(text) : 0;
-  if (days < MIN_DAYS || days > MAX_DAYS) return { error: `Enter a whole number of days from ${MIN_DAYS} to ${MAX_DAYS}.` };
+  const days = staleDaysFrom(formData);
+  return typeof days === "string" ? { error: days } : saveSettings(userId, { staleDaysHoldings: days });
+}
 
-  // user_settings may not exist yet, so this upserts, like settings.ts.
-  await db
-    .insert(userSettings)
-    .values({ userId, staleDaysHoldings: days })
-    .onConflictDoUpdate({ target: userSettings.userId, set: { staleDaysHoldings: days, updatedAt: new Date() } });
-  revalidatePath("/", "layout");
-  return {};
+/** Gold is stale when its newest buy-back price is older than this many days. */
+export async function setStaleDaysGold(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  const userId = await requireUserId();
+  const days = staleDaysFrom(formData);
+  return typeof days === "string" ? { error: days } : saveSettings(userId, { staleDaysGold: days });
+}
+
+/** A Savings Cloud is stale when its latest confirmed value is older than this many days. */
+export async function setStaleDaysClouds(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  const userId = await requireUserId();
+  const days = staleDaysFrom(formData);
+  return typeof days === "string" ? { error: days } : saveSettings(userId, { staleDaysClouds: days });
+}
+
+/** derive_24k: enter the 24K buy-back price and the other karats follow; per_karat: enter a price for each karat. Old prices stay. */
+export async function setGoldPriceMode(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  const userId = await requireUserId();
+  const mode = str(formData, "mode") as (typeof goldPriceMode.enumValues)[number];
+  if (!goldPriceMode.enumValues.includes(mode)) return { error: "Choose how gold prices are entered." };
+  return saveSettings(userId, { goldPriceMode: mode });
 }
