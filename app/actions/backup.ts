@@ -3,17 +3,27 @@
 import { count, eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { db } from "@/db";
-import { accounts, categories, transactions, userSettings } from "@/db/schema";
+import {
+  accounts,
+  allocationOverrides,
+  allocationRules,
+  categories,
+  goalAllocationEvents,
+  goalAllocations,
+  goals,
+  transactions,
+  userSettings,
+} from "@/db/schema";
 import { requireUserId } from "@/lib/auth";
 import { insertOrder, parseBackup } from "@/lib/backup";
 
 export type ImportState = {
   error?: string;
-  imported?: { accounts: number; categories: number; transactions: number };
+  imported?: { accounts: number; categories: number; transactions: number; goals: number; rules: number };
 };
 
 const MAX_BYTES = 5 * 1024 * 1024;
-// 17 columns x 1,000 rows stays under Postgres's 65,535 bind-parameter limit.
+// 17 columns (the widest table) x 1,000 rows stays under Postgres's 65,535 bind-parameter limit.
 const CHUNK = 1000;
 
 class Refused extends Error {}
@@ -25,6 +35,8 @@ function chunks<T>(rows: T[]): T[][] {
 }
 
 const when = (s: string | null) => (s === null ? null : new Date(s));
+// numeric(8,6) columns take text; toFixed(6) is exact for any rate with at most 6 decimals.
+const rateText = (n: number | null) => (n === null ? null : n.toFixed(6));
 
 /** Restores a backup file into an empty account, all or nothing. Never merges and never overwrites. */
 export async function importBackup(_prev: ImportState, formData: FormData): Promise<ImportState> {
@@ -48,18 +60,18 @@ export async function importBackup(_prev: ImportState, formData: FormData): Prom
     await db.transaction(async (tx) => {
       // Upserting settings first takes this user's row lock, so a second restore running at the same time
       // waits here until this one commits, then finds data and refuses.
+      const settings = { ...b.settings, savingsTargetPercent: rateText(b.settings.savingsTargetPercent) };
       await tx
         .insert(userSettings)
-        .values({ userId, monthStartDay: b.settings.monthStartDay })
-        .onConflictDoUpdate({
-          target: userSettings.userId,
-          set: { monthStartDay: b.settings.monthStartDay, updatedAt: new Date() },
-        });
+        .values({ userId, ...settings })
+        .onConflictDoUpdate({ target: userSettings.userId, set: { ...settings, updatedAt: new Date() } });
 
       const [a] = await tx.select({ n: count() }).from(accounts).where(eq(accounts.userId, userId));
       const [c] = await tx.select({ n: count() }).from(categories).where(eq(categories.userId, userId));
       const [t] = await tx.select({ n: count() }).from(transactions).where(eq(transactions.userId, userId));
-      if (a.n + c.n + t.n > 0) {
+      const [g] = await tx.select({ n: count() }).from(goals).where(eq(goals.userId, userId));
+      const [r] = await tx.select({ n: count() }).from(allocationRules).where(eq(allocationRules.userId, userId));
+      if (a.n + c.n + t.n + g.n + r.n > 0) {
         throw new Refused(
           "Nothing was restored. A backup can only be restored into an empty account; this one already has data.",
         );
@@ -87,6 +99,35 @@ export async function importBackup(_prev: ImportState, formData: FormData): Prom
           .insert(transactions)
           .values(part.map((r) => ({ ...r, userId, voidedAt: when(r.voidedAt), createdAt: new Date(r.createdAt) })));
       }
+      // Dependency order: goals and rules before the rows that point at them.
+      for (const part of chunks(b.goals)) {
+        await tx.insert(goals).values(
+          part.map((r) => ({
+            ...r,
+            userId,
+            expectedReturnOverride: rateText(r.expectedReturnOverride),
+            archivedAt: when(r.archivedAt),
+            createdAt: new Date(r.createdAt),
+            updatedAt: new Date(r.updatedAt),
+          })),
+        );
+      }
+      for (const part of chunks(b.goalAllocations)) {
+        await tx
+          .insert(goalAllocations)
+          .values(part.map((r) => ({ ...r, userId, createdAt: new Date(r.createdAt), updatedAt: new Date(r.updatedAt) })));
+      }
+      for (const part of chunks(b.goalAllocationEvents)) {
+        await tx.insert(goalAllocationEvents).values(part.map((r) => ({ ...r, userId, createdAt: new Date(r.createdAt) })));
+      }
+      for (const part of chunks(b.allocationRules)) {
+        await tx
+          .insert(allocationRules)
+          .values(part.map((r) => ({ ...r, userId, percent: rateText(r.percent), createdAt: new Date(r.createdAt) })));
+      }
+      for (const part of chunks(b.allocationOverrides)) {
+        await tx.insert(allocationOverrides).values(part.map((r) => ({ ...r, userId, createdAt: new Date(r.createdAt) })));
+      }
     });
   } catch (e) {
     if (e instanceof Refused) return { error: e.message };
@@ -100,6 +141,12 @@ export async function importBackup(_prev: ImportState, formData: FormData): Prom
 
   revalidatePath("/", "layout");
   return {
-    imported: { accounts: b.accounts.length, categories: b.categories.length, transactions: b.transactions.length },
+    imported: {
+      accounts: b.accounts.length,
+      categories: b.categories.length,
+      transactions: b.transactions.length,
+      goals: b.goals.length,
+      rules: b.allocationRules.length,
+    },
   };
 }
