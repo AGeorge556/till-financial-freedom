@@ -23,6 +23,13 @@ export function GoalProgressBar({ view }: { view: GoalView }) {
   );
 }
 
+/** The target month moved by the months the plan runs early (negative) or late: when the goal is reached at this pace. */
+function finishMonth(targetDate: string, monthsLate: number): string {
+  const [y, m] = targetDate.split("-").map(Number);
+  const shifted = new Date(Date.UTC(y, m - 1 + monthsLate, 1));
+  return formatMonthYear(shifted.toISOString().slice(0, 10));
+}
+
 /** Text plus colour plus a symbol, never colour alone. */
 export function GoalStatusLine({ view, compact }: { view: GoalView; compact?: boolean }) {
   const { goal, current, projection: p } = view;
@@ -48,6 +55,7 @@ export function GoalStatusLine({ view, compact }: { view: GoalView; compact?: bo
       <>
         Projected <Amount value={p.gap} /> above your target by {date}
         {p.monthsLate !== null && `, ${monthsLateText(p.monthsLate)}`}.
+        {p.monthsLate !== null && ` At this pace you reach it in ${finishMonth(goal.targetDate, p.monthsLate)}.`}
       </>
     );
   } else {
@@ -55,7 +63,9 @@ export function GoalStatusLine({ view, compact }: { view: GoalView; compact?: bo
     detail = (
       <>
         Projected <Amount value={-p.gap} /> short of your target by {date}
-        {p.monthsLate === null ? ", and not reached at this pace." : `, ${monthsLateText(p.monthsLate)}.`}
+        {p.monthsLate === null
+          ? ", and not reached at this pace."
+          : `, ${monthsLateText(p.monthsLate)}. At this pace you reach it in ${finishMonth(goal.targetDate, p.monthsLate)}.`}
       </>
     );
   }

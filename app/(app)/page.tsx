@@ -276,6 +276,8 @@ export default async function Home() {
             actual={goalData.totals.actual}
             hasRules={fundedRules.length > 0}
             shortfall={goalData.plan.shortfallTotal}
+            available={goalData.plan.capacity}
+            basis={goalData.plan.basis}
           />
         </div>
       </div>
