@@ -108,3 +108,7 @@ Sign-in with Face ID uses Supabase's passkeys; the app needs no variable or migr
 - Face ID / passkey sign-in (phase 7): uses Supabase Auth's own passkeys, so the app stores no credential and has no new table or variable. It shows only when the Supabase project has passkeys enabled (read from `/auth/v1/settings`, cached for a minute) and the browser supports WebAuthn; the password form always stays. Passkeys are added and removed in Settings. The browser client (`lib/supabase/client.ts`) does auth only and keeps the session in the same cookies `proxy.ts` reads. A passkey is bound to the web address it was created on, so after a domain change the old ones stop working (the password still does).
 - Privacy mode (eye icon in the header) hides every amount and is remembered on the device.
 - An error screen never shows the error message or any figures, only "Try again" and a link Home.
+
+## Starting over with real figures
+
+`npm run db:reset-data` lists what would be deleted and changes nothing. `npm run db:reset-data -- --confirm` deletes every account, transaction, goal, holding, loan, budget and recurring item for the one sign-in account, in a single database transaction. It keeps categories, settings, assumptions and notification subscriptions. It cannot be undone, so download a backup first (More, Backup).
