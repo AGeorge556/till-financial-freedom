@@ -8,11 +8,16 @@ export function GoalPlanCard({
   actual,
   hasRules,
   shortfall,
+  available,
+  basis,
 }: {
   planned: number;
   actual: number;
   hasRules: boolean;
   shortfall: number;
+  /** Income minus spending for the month: the most that can be set aside without dipping into what is already saved. */
+  available: number;
+  basis: "average" | "entered";
 }) {
   const diff = actual - planned;
   return (
@@ -23,6 +28,13 @@ export function GoalPlanCard({
           See the plan
         </Link>
       </div>
+      <p className="mt-1 text-sm text-muted">
+        You can set aside up to{" "}
+        <span className="font-semibold text-foreground">
+          <Amount value={Math.max(0, available)} />
+        </span>{" "}
+        this month, from {basis === "average" ? "your last three months of income and spending" : "the income and spending you entered"}.
+      </p>
       {planned === 0 && !hasRules ? (
         <p className="text-muted">
           You have no monthly plan yet.{" "}
