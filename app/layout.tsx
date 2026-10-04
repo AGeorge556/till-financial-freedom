@@ -14,9 +14,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: { default: "Till Financial Freedom", template: "%s · Till" },
+  title: { default: "TFF", template: "%s · TFF" },
   description: "Personal wealth tracker.",
-  appleWebApp: { capable: true, title: "Till", statusBarStyle: "default" },
+  appleWebApp: { capable: true, title: "TFF", statusBarStyle: "default" },
 };
 
 export const viewport: Viewport = {

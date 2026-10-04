@@ -40,8 +40,10 @@ export async function proxy(request: NextRequest) {
 }
 
 export const config = {
-  // Static assets, the manifest and the icons stay public so the app can be installed before signing in.
+  // Static assets, the manifest and the icons stay public so the app can be installed before signing in. So do two exact
+  // paths: /sw.js (the browser fetches the service worker without our cookies) and /api/cron/reminders (the cron secret
+  // checked inside the route decides, not the login redirect). No session is read for any of them.
   matcher: [
-    "/((?!_next/static|_next/image|favicon\\.ico|manifest\\.webmanifest|icon/|apple-icon|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|txt|xml|woff2?)$).*)",
+    "/((?!_next/static|_next/image|favicon\\.ico|manifest\\.webmanifest|icon/|apple-icon|sw\\.js$|api/cron/reminders$|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|txt|xml|woff2?)$).*)",
   ],
 };

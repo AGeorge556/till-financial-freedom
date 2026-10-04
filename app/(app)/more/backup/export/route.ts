@@ -21,12 +21,12 @@ export async function GET(request: NextRequest) {
     // The BOM makes Excel read the file as UTF-8, so Arabic names survive.
     body = `\uFEFF${transactionsToCsv(transactions, byId(accounts), byId(categories))}`;
     contentType = "text/csv; charset=utf-8";
-    filename = `till-transactions-${cairoToday()}.csv`;
+    filename = `tff-transactions-${cairoToday()}.csv`;
   } else {
     // loadBackupRows has no return annotation, so serializeBackup's input type is what fails if a table is missing.
     body = JSON.stringify(serializeBackup(await loadBackupRows(userId)));
     contentType = "application/json; charset=utf-8";
-    filename = `till-backup-${cairoToday()}.json`;
+    filename = `tff-backup-${cairoToday()}.json`;
   }
 
   return new Response(body, {

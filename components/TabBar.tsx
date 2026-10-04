@@ -33,7 +33,7 @@ export function TabBar() {
       aria-label="Primary"
       className="fixed inset-x-0 bottom-0 z-20 border-t border-border bg-surface pb-[env(safe-area-inset-bottom)] md:inset-y-0 md:right-auto md:w-60 md:border-t-0 md:border-r md:px-3 md:pt-[calc(1.5rem+env(safe-area-inset-top))] md:pb-6 md:pl-[max(0.75rem,env(safe-area-inset-left))]"
     >
-      <p className="mb-6 hidden px-3 text-lg font-semibold tracking-tight md:block">Till</p>
+      <p className="mb-6 hidden px-3 text-lg font-semibold tracking-tight md:block">TFF</p>
       <ul className="grid grid-cols-5 md:flex md:flex-col md:gap-1">
         {tabs.map(({ href, label, color, d }) => {
           const active = href === "/" ? pathname === "/" : pathname.startsWith(href);

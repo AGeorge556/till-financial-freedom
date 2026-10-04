@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { egpToPiasters as egp } from "./money";
-import { buildReminders, type ReminderInput, type ReminderKind, type ReminderSwitches } from "./reminders";
+import { buildReminders, pushSummary, type ReminderInput, type ReminderKind, type ReminderSwitches } from "./reminders";
 
 const MONTH = { start: "2026-04-01", end: "2026-04-30" };
 const ALL_ON: ReminderSwitches = { review: true, recurring: true, stale: true, goal: true, budget: true, savings: true };
@@ -160,6 +160,62 @@ describe("other conditions", () => {
   it("amounts are parts, never plain text", () => {
     for (const r of run(everything(), "2026-04-25")) {
       for (const p of r.text) if ("text" in p) expect(p.text).not.toMatch(/EGP|\d,\d{3}|\d{4,}/);
+    }
+  });
+});
+
+describe("pushSummary", () => {
+  it("is null when there is nothing to say", () => {
+    expect(pushSummary([])).toBeNull();
+    expect(pushSummary(run(nothing(), "2026-04-25"))).toBeNull();
+  });
+
+  it("names the kinds in plain words and counts them in the title", () => {
+    const s = pushSummary(run(everything(), "2026-04-25"));
+    expect(s).toEqual({
+      title: "TFF: 5 things need a look",
+      body: "Recurring items to confirm - your investment values are out of date - a goal contribution is due - a budget is near or over its limit - last month's saving was below your target",
+    });
+  });
+
+  it("uses singular wording for one kind and counts repeated goals and budgets", () => {
+    expect(pushSummary(run(nothing({ staleCount: 1 }), "2026-04-25"))).toEqual({
+      title: "TFF: 1 thing needs a look",
+      body: "Your investment values are out of date",
+    });
+    const many = nothing({
+      goals: [
+        { id: "a", name: "Car", planned: egp(10), actual: 0 },
+        { id: "b", name: "House", planned: egp(10), actual: 0 },
+      ],
+      budgets: [
+        { id: "x", name: "Food", status: { level: "over", spent: egp(2), budget: egp(1), percentUsed: 2 } },
+        { id: "y", name: "Fun", status: { level: "warn", spent: egp(9), budget: egp(10), percentUsed: 0.9 } },
+        { id: "z", name: "Fuel", status: { level: "over", spent: egp(2), budget: egp(1), percentUsed: 2 } },
+      ],
+    });
+    expect(pushSummary(run(many, "2026-04-25"))?.body).toBe("2 goal contributions are due - 3 budgets are near or over their limit");
+  });
+
+  it("never carries an amount, a currency or a name, whatever the inputs", () => {
+    const input = nothing({
+      previousMonthHasData: true,
+      pendingRecurring: { count: 12, expense: egp(7_654_321), income: egp(1_234_567) },
+      staleCount: 4,
+      goals: [{ id: "g", name: "Emergency Fund 20260101", planned: egp(9_876_543), actual: egp(1_234_567) }],
+      budgets: [
+        { id: "b", name: "Groceries 5550123", status: { level: "over", spent: egp(8_765_432), budget: egp(1_000_000), percentUsed: 8.7 } },
+        { id: "c", name: "Cairo Rent", status: { level: "warn", spent: egp(900_000), budget: egp(1_000_000), percentUsed: 0.9 } },
+      ],
+      lastMonthSavings: { saved: egp(1_111_111), target: egp(3_333_333) },
+    });
+    for (const today of ["2026-04-03", "2026-04-25"]) {
+      const s = pushSummary(run(input, today));
+      expect(s).not.toBeNull();
+      const text = `${s!.title} ${s!.body}`;
+      expect(text).not.toMatch(/\d{3,}/);
+      expect(text).not.toMatch(/EGP|LE\b|£|\$/i);
+      for (const name of ["Emergency", "Fund", "Groceries", "Cairo", "Rent"]) expect(text).not.toContain(name);
     }
   });
 });

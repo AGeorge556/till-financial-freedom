@@ -2,8 +2,8 @@ import type { MetadataRoute } from "next";
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: "Till Financial Freedom",
-    short_name: "Till",
+    name: "TFF",
+    short_name: "TFF",
     description: "Personal wealth tracker.",
     start_url: "/",
     display: "standalone",

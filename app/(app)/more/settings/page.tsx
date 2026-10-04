@@ -1,9 +1,11 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { PasskeySettings } from "@/components/PasskeySettings";
 import { BackLink, card } from "@/components/ui";
 import { getSettings } from "@/db/queries";
 import { AUTO_LOCK_CHOICES } from "@/db/schema";
 import { requireUserId } from "@/lib/auth";
+import { passkeysEnabled } from "@/lib/supabase/settings";
 import { AutoLockForm, MonthStartForm } from "./SettingsForms";
 
 export const metadata: Metadata = { title: "Settings" };
@@ -16,7 +18,7 @@ const links = [
 
 export default async function Page() {
   const userId = await requireUserId();
-  const { monthStartDay, autoLockMinutes } = await getSettings(userId);
+  const [{ monthStartDay, autoLockMinutes }, passkeys] = await Promise.all([getSettings(userId), passkeysEnabled()]);
 
   return (
     <>
@@ -40,9 +42,20 @@ export default async function Page() {
         <div className={`p-5 ${card}`}>
           <p className="mb-4 text-sm text-muted">
             Signs you out when you have not touched the app for this long, and when you open it again after being away
-            that long. You then sign in again with your password. It is on by default, at 5 minutes.
+            that long. You then sign in again. It is on by default, at 5 minutes.
           </p>
           <AutoLockForm minutes={autoLockMinutes} choices={AUTO_LOCK_CHOICES} />
+        </div>
+      </section>
+
+      <section className="mt-8">
+        <h2 className="mb-2 text-lg font-semibold tracking-tight">Face ID and passkeys</h2>
+        <div className={`p-5 ${card}`}>
+          {passkeys ? (
+            <PasskeySettings />
+          ) : (
+            <p className="text-sm text-muted">Face ID sign-in is not switched on for this account yet.</p>
+          )}
         </div>
       </section>
 

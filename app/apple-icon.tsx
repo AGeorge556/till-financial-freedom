@@ -18,7 +18,7 @@ export default function AppleIcon() {
           color: "#f7f5f0",
         }}
       >
-        <div style={{ fontSize: 90, fontWeight: 700, lineHeight: 1 }}>T</div>
+        <div style={{ fontSize: 56, fontWeight: 700, lineHeight: 1, letterSpacing: -1 }}>TFF</div>
         <div style={{ width: 40, height: 6, marginTop: 6, background: "#22d3ee" }} />
       </div>
     ),

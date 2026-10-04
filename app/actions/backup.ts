@@ -65,7 +65,7 @@ export async function importBackup(_prev: ImportState, formData: FormData): Prom
 
   const file = formData.get("file");
   if (!(file instanceof File) || file.size === 0) return { error: "Choose a backup file (.json) first." };
-  if (file.size > MAX_BYTES) return { error: "That file is larger than 5 MB, so it is not a Till backup." };
+  if (file.size > MAX_BYTES) return { error: "That file is larger than 5 MB, so it is not a TFF backup." };
 
   let json: unknown;
   try {
