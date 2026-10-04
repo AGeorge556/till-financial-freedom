@@ -10,11 +10,11 @@ const rate = (r: number | null) => (r === null ? "No rate noted" : `${ratePercen
 
 const th = "px-4 py-3 font-medium";
 
-/** Loans and money owed: a card list on a phone, a table from 768px. */
+/** Loans and money owed: a card list on a phone, a table from 1024px. */
 export function LiabilityList({ liabilities, muted }: { liabilities: LiabilityView[]; muted?: boolean }) {
   return (
     <>
-      <ul className="divide-y divide-border overflow-hidden rounded-2xl border border-border bg-surface md:hidden">
+      <ul className="divide-y divide-border overflow-hidden rounded-2xl border border-border bg-surface lg:hidden">
         {liabilities.map((l) => (
           <li key={l.id}>
             <Link
@@ -22,8 +22,8 @@ export function LiabilityList({ liabilities, muted }: { liabilities: LiabilityVi
               className={`flex min-h-14 items-center justify-between gap-3 px-4 py-2 ${muted ? "text-muted" : ""}`}
             >
               <span className="min-w-0">
-                <span className="block truncate font-medium">{l.name}</span>
-                <span className="block truncate text-sm text-muted">
+                <span dir="auto" className="block break-words font-medium">{l.name}</span>
+                <span className="block break-words text-sm text-muted">
                   {KIND_LABEL[l.kind]} · {rate(l.interestRate)}
                 </span>
               </span>
@@ -32,7 +32,12 @@ export function LiabilityList({ liabilities, muted }: { liabilities: LiabilityVi
           </li>
         ))}
       </ul>
-      <div className="hidden overflow-x-auto rounded-2xl border border-border bg-surface md:block">
+      <div
+        role="region"
+        aria-label="Loans and money owed, scrolls sideways"
+        tabIndex={0}
+        className="hidden overflow-x-auto rounded-2xl border border-border bg-surface lg:block"
+      >
         <table className="w-full text-sm">
           <caption className="sr-only">Loans and money owed</caption>
           <thead className="text-left text-muted">

@@ -158,10 +158,11 @@ export type RuleFormValues = {
 
 export type GoalOption = { id: string; name: string; archived: boolean };
 
-export function RuleButton({ rule, goals }: { rule?: RuleFormValues; goals: GoalOption[] }) {
+/** `name` (what the rule funds) lets a screen reader tell the Edit buttons of a list apart. */
+export function RuleButton({ rule, goals, name }: { rule?: RuleFormValues; goals: GoalOption[]; name?: string }) {
   return (
     <GoalSheet
-      trigger={rule ? "Edit" : "Add a rule"}
+      trigger={rule ? <>Edit<span className="sr-only"> rule for {name}</span></> : "Add a rule"}
       title={rule ? "Edit rule" : "New rule"}
       className={rule ? smallBtn : "min-h-11 rounded-xl bg-foreground px-4 font-semibold text-background"}
     >
@@ -249,14 +250,15 @@ function RuleForm({ rule, goals, onDone }: { rule?: RuleFormValues; goals: GoalO
   );
 }
 
-export function DeleteRuleButton({ id }: { id: string }) {
+export function DeleteRuleButton({ id, name }: { id: string; name: string }) {
   return (
     <Form action={deleteRule} confirm="Delete this rule? Any change you made for a month goes with it.">
       {({ pending }) => (
         <>
           <input type="hidden" name="id" value={id} />
           <button type="submit" disabled={pending} className={`${smallBtn} text-negative`}>
-            Delete
+            {pending ? "Deleting…" : "Delete"}
+            <span className="sr-only"> rule for {name}</span>
           </button>
         </>
       )}
@@ -264,9 +266,13 @@ export function DeleteRuleButton({ id }: { id: string }) {
   );
 }
 
-export function OverrideButton({ ruleId, month, planned }: { ruleId: string; month: string; planned: number }) {
+export function OverrideButton({ ruleId, month, planned, name }: { ruleId: string; month: string; planned: number; name: string }) {
   return (
-    <GoalSheet trigger="Change this month" title="Change this month's amount" className={smallBtn}>
+    <GoalSheet
+      trigger={<>Change this month<span className="sr-only">: {name}</span></>}
+      title="Change this month's amount"
+      className={smallBtn}
+    >
       {(close) => (
         <Form action={setOverride} onSuccess={close}>
           {({ pending }) => (
@@ -297,7 +303,7 @@ export function OverrideButton({ ruleId, month, planned }: { ruleId: string; mon
   );
 }
 
-export function ClearOverrideButton({ ruleId, month }: { ruleId: string; month: string }) {
+export function ClearOverrideButton({ ruleId, month, name }: { ruleId: string; month: string; name: string }) {
   return (
     <Form action={clearOverride}>
       {({ pending }) => (
@@ -305,7 +311,8 @@ export function ClearOverrideButton({ ruleId, month }: { ruleId: string; month: 
           <input type="hidden" name="ruleId" value={ruleId} />
           <input type="hidden" name="month" value={month} />
           <button type="submit" disabled={pending} className={smallBtn}>
-            Back to the rule
+            {pending ? "Saving…" : "Back to the rule"}
+            <span className="sr-only">: {name}</span>
           </button>
         </>
       )}

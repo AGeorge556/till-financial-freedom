@@ -27,8 +27,8 @@ export function AccountList({ accounts, muted }: { accounts: AccountListItem[]; 
               className={`flex min-h-14 items-center justify-between gap-3 px-4 py-2 ${muted ? "text-muted" : ""}`}
             >
               <span className="min-w-0">
-                <span className="block truncate font-medium">{a.name}</span>
-                <span className="block truncate text-sm text-muted">
+                <span dir="auto" className="block break-words font-medium">{a.name}</span>
+                <span className="block break-words text-sm text-muted">
                   {ACCOUNT_TYPE_LABEL[a.type]}
                   {a.institution ? ` · ${a.institution}` : ""}
                 </span>

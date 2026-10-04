@@ -46,8 +46,6 @@ export type ScenarioInput = {
   returns: Record<MixClass, number>;
   /** What each class is worth today. */
   startValues: Record<MixClass, Piasters>;
-  /** How the invested part splits across stocks, gold and clouds (allocation rules); null = today's mix of those three. */
-  investSplit: Record<Invested, number> | null;
   liabilities: Piasters;
   years: number;
   /** Annual inflation, a decimal; null = leave out the real-terms figures. */
@@ -93,8 +91,8 @@ export type ScenarioResult = {
   used: {
     monthlySavings: Piasters;
     monthlyInvestment: Piasters;
+    /** How the invested part splits across stocks, gold and clouds: today's mix of those three. */
     investSplit: Record<Invested, number>;
-    splitSource: "rules" | "current-mix";
     returns: Record<MixClass, number>;
     incomeGrowth: number;
     inflation: number | null;
@@ -111,13 +109,13 @@ function check(input: ScenarioInput): void {
   if (rates.some((r) => !Number.isFinite(r) || r <= -1)) throw new RangeError("Rates must be above -100%");
 }
 
-function split(input: ScenarioInput): { weights: Record<Invested, number>; source: "rules" | "current-mix" } {
-  const raw = input.investSplit ?? { stocks: input.startValues.stocks, gold: input.startValues.gold, clouds: input.startValues.clouds };
-  const total = INVESTED.reduce((s, c) => s + Math.max(0, raw[c]), 0);
-  // Nothing held and no rules: the invested part goes to stocks rather than vanishing.
-  if (total === 0) return { weights: { stocks: 1, gold: 0, clouds: 0 }, source: input.investSplit ? "rules" : "current-mix" };
-  const w = (c: Invested) => Math.max(0, raw[c]) / total;
-  return { weights: { stocks: w("stocks"), gold: w("gold"), clouds: w("clouds") }, source: input.investSplit ? "rules" : "current-mix" };
+/** Weights of the invested part: today's mix of stocks, gold and clouds. */
+function split(input: ScenarioInput): Record<Invested, number> {
+  const total = INVESTED.reduce((s, c) => s + Math.max(0, input.startValues[c]), 0);
+  // Nothing held: the invested part goes to stocks rather than vanishing.
+  if (total === 0) return { stocks: 1, gold: 0, clouds: 0 };
+  const w = (c: Invested) => Math.max(0, input.startValues[c]) / total;
+  return { stocks: w("stocks"), gold: w("gold"), clouds: w("clouds") };
 }
 
 /** End date of the financial month holding the m-th contribution (m >= 1), counting from the first one still to come. */
@@ -129,7 +127,7 @@ function contributionDate(today: string, startDay: number, contributedThisMonth:
 
 export function projectScenario(input: ScenarioInput): ScenarioResult {
   check(input);
-  const { weights, source } = split(input);
+  const weights = split(input);
   const monthly = Object.fromEntries(MIX_CLASSES.map((c) => [c, monthlyRate(input.returns[c])])) as Record<MixClass, number>;
   const values = Object.fromEntries(MIX_CLASSES.map((c) => [c, input.startValues[c] as number])) as Record<MixClass, number>;
 
@@ -172,7 +170,6 @@ export function projectScenario(input: ScenarioInput): ScenarioResult {
       monthlySavings: roundPiasters(first),
       monthlyInvestment: roundPiasters(investedInYear(0)),
       investSplit: weights,
-      splitSource: source,
       returns: input.returns,
       incomeGrowth: input.incomeGrowth,
       inflation: input.inflation,

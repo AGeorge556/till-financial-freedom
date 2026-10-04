@@ -10,6 +10,7 @@ import { HoldingList } from "@/components/HoldingList";
 import { HoldingPL } from "@/components/HoldingPL";
 import { Panel } from "@/components/HoldingParts";
 import { card } from "@/components/ui";
+import { Wide } from "@/components/Wide";
 import { MixChart } from "@/components/charts/MixChart";
 import { MixTargets } from "@/components/charts/MixTargets";
 import { ratePercentText } from "@/components/GoalFormat";
@@ -52,7 +53,7 @@ export default async function Page() {
   const nothing = active.length === 0 && clouds.length === 0;
 
   return (
-    <>
+    <Wide>
       <h1 className="text-3xl font-semibold tracking-tight">Investments</h1>
 
       {nothing ? (
@@ -221,7 +222,7 @@ export default async function Page() {
             {archivedViews.map((v) => (
               <li key={v.row.id}>
                 <Link href={`/investments/${v.row.id}`} className="flex min-h-14 items-center justify-between gap-3 px-4 py-2 text-muted">
-                  <span className="truncate">{v.row.name}</span>
+                  <span className="min-w-0 break-words">{v.row.name}</span>
                   <span className="shrink-0 text-sm">
                     Sold or written off: <HoldingPL value={v.state.realizedPL} />
                   </span>
@@ -231,13 +232,13 @@ export default async function Page() {
             {archivedClouds.map((c) => (
               <li key={c.row.id}>
                 <Link href={`/investments/${c.row.id}`} className="flex min-h-14 items-center px-4 py-2 text-muted">
-                  <span className="truncate">{c.row.name}</span>
+                  <span className="min-w-0 break-words">{c.row.name}</span>
                 </Link>
               </li>
             ))}
           </ul>
         </section>
       )}
-    </>
+    </Wide>
   );
 }

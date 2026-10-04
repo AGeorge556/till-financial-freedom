@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { PrivacyBootScript } from "@/components/PrivacyProvider";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -26,9 +27,6 @@ export const viewport: Viewport = {
   ],
 };
 
-// Same key as PRIVACY_KEY in components/PrivacyProvider.tsx; runs before first paint so amounts never flash.
-const privacyBoot = `try{if(localStorage.getItem("till:privacy")==="on")document.documentElement.setAttribute("data-privacy-boot","")}catch(e){}`;
-
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html
@@ -36,10 +34,10 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
       suppressHydrationWarning
     >
-      <body className="min-h-full">
-        <script dangerouslySetInnerHTML={{ __html: privacyBoot }} />
-        {children}
-      </body>
+      <head>
+        <PrivacyBootScript />
+      </head>
+      <body className="min-h-full">{children}</body>
     </html>
   );
 }

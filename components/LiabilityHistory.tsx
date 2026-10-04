@@ -47,7 +47,7 @@ export function LiabilityHistory({ entries }: { entries: LiabilityEntry[] }) {
           ) : (
             <p className="text-sm text-muted">No cash moved.</p>
           )}
-          {e.kind === "payment" && !e.voided && <LiabilityVoidButton id={e.txId} />}
+          {e.kind === "payment" && !e.voided && <LiabilityVoidButton id={e.txId} what={`payment of ${dateText(e.date)}`} />}
         </li>
       ))}
     </ul>

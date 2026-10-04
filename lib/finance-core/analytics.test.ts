@@ -4,6 +4,7 @@ import {
   DEFAULT_NOTABLE_AMOUNT,
   DEFAULT_NOTABLE_PERCENT,
   fullMonths,
+  incomeByCategory,
   monthToDateComparison,
   monthTotals,
   spendingBy,
@@ -51,6 +52,47 @@ describe("spendingBy", () => {
 
   it("is empty when nothing was spent", () => {
     expect(spendingBy([exp("2026-03-01", 10, { status: "pending" })], "category")).toEqual([]);
+  });
+});
+
+describe("incomeByCategory", () => {
+  const inc = (amountEgp: number, over: Partial<CategorizedTx> = {}): CategorizedTx => ({
+    type: "INCOME",
+    date: "2026-03-01",
+    amount: egp(amountEgp),
+    toAccountId: "bank",
+    status: "posted",
+    ...over,
+  });
+
+  it("groups posted earned income by category, largest first, with shares of the earned total", () => {
+    const out = incomeByCategory([
+      inc(1_000, { categoryId: "side" }),
+      inc(6_000, { categoryId: "salary" }),
+      inc(2_000, { categoryId: "salary" }),
+      inc(1_000),
+    ]);
+    expect(out).toEqual([
+      { key: "salary", total: egp(8_000), share: 0.8 },
+      { key: "side", total: egp(1_000), share: 0.1 },
+      { key: null, total: egp(1_000), share: 0.1 },
+    ]);
+  });
+
+  it("leaves out pending, void, dividends, interest and other types", () => {
+    const out = incomeByCategory([
+      inc(100, { categoryId: "salary" }),
+      inc(900, { categoryId: "salary", status: "pending" }),
+      inc(900, { categoryId: "salary", status: "void" }),
+      inc(900, { categoryId: "salary", type: "DIVIDEND" }),
+      inc(900, { categoryId: "salary", type: "INTEREST" }),
+      exp("2026-03-01", 900, { categoryId: "salary" }),
+    ]);
+    expect(out).toEqual([{ key: "salary", total: egp(100), share: 1 }]);
+  });
+
+  it("is empty when nothing was earned", () => {
+    expect(incomeByCategory([])).toEqual([]);
   });
 });
 

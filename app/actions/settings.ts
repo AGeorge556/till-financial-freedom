@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { db } from "@/db";
-import { savingsTargetMode, userSettings } from "@/db/schema";
+import { AUTO_LOCK_CHOICES, savingsTargetMode, userSettings } from "@/db/schema";
 import { requireUserId } from "@/lib/auth";
 import { parseEGP } from "@/lib/finance-core/money";
 import { MIX_CLASSES, type MixClass, validateTargets } from "@/lib/finance-core/portfolioMix";
@@ -23,11 +23,37 @@ function percentToRate(text: string): string | null {
 
 // user_settings may not exist yet (getSettings falls back to defaults), so these upsert.
 async function upsert(userId: string, fields: Partial<typeof userSettings.$inferInsert>) {
-  await db
-    .insert(userSettings)
-    .values({ userId, ...fields })
-    .onConflictDoUpdate({ target: userSettings.userId, set: { ...fields, updatedAt: new Date() } });
+  await db.transaction((tx) =>
+    tx
+      .insert(userSettings)
+      .values({ userId, ...fields })
+      .onConflictDoUpdate({ target: userSettings.userId, set: { ...fields, updatedAt: new Date() } }),
+  );
   revalidatePath("/", "layout");
+}
+
+/** "My month starts on day N": a whole day from 1 to 28 (the user_settings_month_start_day_range check). */
+export async function setMonthStartDay(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  const userId = await requireUserId();
+  const text = str(formData, "day");
+  const day = /^\d{1,2}$/.test(text) ? Number(text) : 0;
+  if (day < 1 || day > 28) return { error: "Choose a day from 1 to 28." };
+
+  await upsert(userId, { monthStartDay: day });
+  return {};
+}
+
+/** Minutes without activity before the app signs out: one of AUTO_LOCK_CHOICES, or "off" (stored as null). */
+export async function setAutoLock(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  const userId = await requireUserId();
+  const text = str(formData, "minutes");
+  const minutes = text === "off" ? null : Number(text);
+  if (minutes !== null && !(AUTO_LOCK_CHOICES as readonly number[]).includes(minutes)) {
+    return { error: "Choose off, or 1, 5, 15 or 30 minutes." };
+  }
+
+  await upsert(userId, { autoLockMinutes: minutes });
+  return {};
 }
 
 /** Rule G. Only the figure the chosen mode uses is kept; "flexible" keeps none. */

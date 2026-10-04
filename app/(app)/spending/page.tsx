@@ -5,6 +5,7 @@ import { BudgetCard } from "@/components/BudgetParts";
 import { RecurringPendingList } from "@/components/RecurringPending";
 import { changeWords } from "@/components/ReviewParts";
 import { TransactionList } from "@/components/TransactionList";
+import { Wide } from "@/components/Wide";
 import { requireUserId } from "@/lib/auth";
 import type { Piasters } from "@/lib/finance-core/money";
 import { loadSpending, type Share } from "./data";
@@ -24,7 +25,7 @@ function ShareList({ title, items, total }: { title: string; items: Share[]; tot
           return (
             <li key={item.key ?? "none"} className="px-4 py-3">
               <div className="flex items-baseline justify-between gap-3">
-                <span className="min-w-0 truncate">{item.name}</span>
+                <span className="min-w-0 break-words">{item.name}</span>
                 <span className="shrink-0 font-medium">
                   <Amount value={item.total} /> <span className="text-sm font-normal text-muted">{pct}%</span>
                 </span>
@@ -57,7 +58,7 @@ export default async function Page({ searchParams }: { searchParams: Promise<{ m
   const byCategory = d.budgets.lines.filter((l) => l.categoryId !== null);
 
   return (
-    <>
+    <Wide>
       <h1 className="text-3xl font-semibold tracking-tight">Spending</h1>
 
       <MonthNav base="/spending" month={d.month} current={d.current} monthStartDay={d.startDay} />
@@ -83,9 +84,9 @@ export default async function Page({ searchParams }: { searchParams: Promise<{ m
             You have not set a monthly budget. A budget shows how much is left and where the month is heading.
           </p>
         ) : (
-          <div className="grid gap-3 md:grid-cols-2">
+          <div className="grid gap-3 lg:grid-cols-2">
             {overall && (
-              <div className="md:col-span-2">
+              <div className="lg:col-span-2">
                 <BudgetCard name="Everything you spend" status={overall.status} ongoing={d.isCurrent} />
               </div>
             )}
@@ -103,7 +104,7 @@ export default async function Page({ searchParams }: { searchParams: Promise<{ m
         {d.spending === 0 ? (
           <p className="text-muted">No spending recorded in this month.</p>
         ) : (
-          <div className="grid gap-6 md:grid-cols-2">
+          <div className="grid gap-6 lg:grid-cols-2">
             <ShareList title="By category, largest first" items={d.byCategory} total={d.spending} />
             <ShareList title="By account" items={d.byAccount} total={d.spending} />
           </div>
@@ -151,12 +152,17 @@ export default async function Page({ searchParams }: { searchParams: Promise<{ m
         </div>
       </section>
 
-      <TransactionList
-        rows={d.rows}
-        accounts={d.accounts.map((a) => ({ id: a.id, name: a.name, archived: a.archivedAt !== null }))}
-        categories={d.categories.map((c) => ({ id: c.id, name: c.name, kind: c.kind, archived: c.archivedAt !== null }))}
-        today={d.today}
-      />
-    </>
+      <section aria-labelledby="transactions-heading" className="mt-8">
+        <h2 id="transactions-heading" className={h2}>
+          Transactions
+        </h2>
+        <TransactionList
+          rows={d.rows}
+          accounts={d.accounts.map((a) => ({ id: a.id, name: a.name, archived: a.archivedAt !== null }))}
+          categories={d.categories.map((c) => ({ id: c.id, name: c.name, kind: c.kind, archived: c.archivedAt !== null }))}
+          today={d.today}
+        />
+      </section>
+    </Wide>
   );
 }

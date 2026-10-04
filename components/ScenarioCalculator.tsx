@@ -9,6 +9,7 @@ import { Amount } from "./Amount";
 import { BarChart } from "./charts/BarChart";
 import { formatMonthYear } from "./dates";
 import { egpText, formatRate, monthsLateText, ratePercentText } from "./GoalFormat";
+import { usePrivacy } from "./PrivacyProvider";
 import { Field, field, secondaryBtn, card } from "./ui";
 
 type State = {
@@ -79,6 +80,7 @@ function Num({
   error,
   onChange,
   placeholder,
+  money,
 }: {
   label: string;
   hint?: string;
@@ -86,12 +88,20 @@ function Num({
   error?: string;
   onChange: (v: string) => void;
   placeholder?: string;
+  /** An amount of money: dotted out in privacy mode, and selected on focus so typing replaces what the dots hide. */
+  money?: boolean;
 }) {
+  const { hidden } = usePrivacy();
+  const masked = money && hidden;
   return (
     <Field label={label}>
       <input
         value={value}
         onChange={(e) => onChange(e.target.value)}
+        type={masked ? "password" : "text"}
+        onFocus={masked ? (e) => e.currentTarget.select() : undefined}
+        // Hidden before the page hydrates while privacy mode is on (app/globals.css).
+        data-amount={money ? "" : undefined}
         inputMode="decimal"
         autoComplete="off"
         placeholder={placeholder}
@@ -177,8 +187,9 @@ function Assumptions({ used, input, typedInvestment }: { used: ScenarioResult["u
         {input.monthlySavings === null ? " (income minus spending, rising as income grows)" : " (the figure you typed, kept flat)"}.{" "}
         {used.monthlyInvestment > 0 ? (
           <>
-            <Amount value={used.monthlyInvestment} /> of it is invested, split by what you hold today (stocks and funds {share("stocks")},
-            gold {share("gold")}, Savings Clouds {share("clouds")}); the rest stays in cash.
+            <Amount value={used.monthlyInvestment} /> of it is invested. It is split by today&apos;s mix of what you hold, not by your
+            allocation rules (stocks and funds {share("stocks")}, gold {share("gold")}, Savings Clouds {share("clouds")}); the rest
+            stays in cash.
           </>
         ) : (
           "None of it is invested; it all stays in cash."
@@ -231,10 +242,16 @@ export function ScenarioCalculator({
   const errors = built.errors ?? {};
   const result = outcome && "result" in outcome ? outcome.result : null;
   const last = result?.rows[result.rows.length - 1];
+  const { hidden } = usePrivacy();
 
   return (
     <>
       <section className={`mt-6 p-5 ${card}`}>
+        {hidden && (
+          <p className="mb-4 text-sm text-muted">
+            Amounts are hidden, so the money fields show dots. Tap a field and type to replace what is in it.
+          </p>
+        )}
         <p className="mb-4 text-sm text-muted">
           {inputsMissing
             ? "You have no history or entered figures yet, so income and spending start at 0. "
@@ -244,10 +261,11 @@ export function ScenarioCalculator({
           Change anything and the results update. Nothing here is saved.
         </p>
         <div className="grid gap-4 sm:grid-cols-2">
-          <Num label="Income a month (EGP)" value={s.income} error={errors.income} onChange={(income) => set({ income })} />
+          <Num money label="Income a month (EGP)" value={s.income} error={errors.income} onChange={(income) => set({ income })} />
           <Num label="Income growth a year (%)" value={s.growth} error={errors.growth} onChange={(growth) => set({ growth })} />
-          <Num label="Spending a month (EGP)" value={s.spending} error={errors.spending} onChange={(spending) => set({ spending })} />
+          <Num money label="Spending a month (EGP)" value={s.spending} error={errors.spending} onChange={(spending) => set({ spending })} />
           <Num
+            money
             label="Saving a month (EGP)"
             hint="Leave blank to use income minus spending."
             value={s.savings}
@@ -255,6 +273,7 @@ export function ScenarioCalculator({
             onChange={(savings) => set({ savings })}
           />
           <Num
+            money
             label="Invested a month (EGP)"
             hint="The part of your saving that is invested."
             value={s.investment}
@@ -270,7 +289,7 @@ export function ScenarioCalculator({
           />
         </div>
 
-        <h3 className="mt-6 font-semibold">Expected return a year</h3>
+        <h2 className="mt-6 font-semibold">Expected return a year</h2>
         <div className="mt-2 grid gap-4 sm:grid-cols-2">
           {MIX_CLASSES.map((c) => (
             <Num
@@ -368,7 +387,7 @@ export function ScenarioCalculator({
                 bars={result.rows.map((r) => ({ label: r.year === 0 ? "Now" : String(r.year), value: r.netWorth }))}
               />
             </div>
-            <div className={`mt-3 overflow-x-auto ${card}`}>
+            <div role="region" aria-label="Projected figures by year, scrolls sideways" tabIndex={0} className={`mt-3 overflow-x-auto ${card}`}>
               <table className="w-full text-left text-sm">
                 <caption className="sr-only">Projected figures by year</caption>
                 <thead>

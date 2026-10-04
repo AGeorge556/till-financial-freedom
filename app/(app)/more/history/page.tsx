@@ -28,7 +28,7 @@ export default async function Page({ searchParams }: { searchParams: Promise<{ r
           <Link
             key={r}
             href={`/more/history?range=${r}`}
-            aria-current={r === range ? "page" : undefined}
+            aria-current={r === range ? "true" : undefined}
             className={`inline-flex min-h-11 items-center rounded-xl border px-4 text-sm font-medium ${r === range ? "border-foreground bg-foreground text-background" : "border-border"}`}
           >
             {LABEL[r]}

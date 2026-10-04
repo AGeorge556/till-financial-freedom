@@ -81,7 +81,7 @@ function Row({ row, onOpen }: { row: ListRow; onOpen: (row: ListRow) => void }) 
   const body = (
     <>
       <span className="min-w-0">
-        <span className={`block truncate font-medium ${voided ? "line-through" : ""}`}>
+        <span dir="auto" className={`block break-words font-medium ${voided ? "line-through" : ""}`}>
           {row.category ?? TYPE_LABEL[row.type]}
           {row.status === "pending" && (
             <span className="ml-2 rounded-full border border-border px-2 py-0.5 align-middle text-xs font-normal text-muted">
@@ -94,7 +94,7 @@ function Row({ row, onOpen }: { row: ListRow; onOpen: (row: ListRow) => void }) 
             </span>
           )}
         </span>
-        <span className="block truncate text-sm text-muted">
+        <span dir="auto" className="block line-clamp-2 break-words text-sm text-muted">
           {row.account}
           {row.note ? ` · ${row.note}` : ""}
         </span>
@@ -107,7 +107,8 @@ function Row({ row, onOpen }: { row: ListRow; onOpen: (row: ListRow) => void }) 
   );
   const layout = "flex min-h-14 w-full items-center justify-between gap-3 px-4 py-2 text-left";
   return isEditable(row) ? (
-    <button type="button" onClick={() => onOpen(row)} className={layout}>
+    <button type="button" onClick={() => onOpen(row)} aria-haspopup="dialog" className={layout}>
+      <span className="sr-only">Edit {TYPE_LABEL[row.type].toLowerCase()}: </span>
       {body}
     </button>
   ) : (
@@ -144,7 +145,6 @@ export function TransactionList({
       {voidedCount > 0 && (
         <button
           type="button"
-          aria-pressed={showVoided}
           onClick={() => setShowVoided((v) => !v)}
           className="mt-4 min-h-11 rounded-xl border border-border px-4 text-sm font-medium"
         >
@@ -167,7 +167,7 @@ export function TransactionList({
       ) : (
         days.map((day) => (
           <section key={day.date} className="mt-6">
-            <h2 className="mb-2 text-sm font-medium text-muted">{formatWeekday(day.date)}</h2>
+            <h3 className="mb-2 text-sm font-medium text-muted">{formatWeekday(day.date)}</h3>
             <ul className="divide-y divide-border overflow-hidden rounded-2xl border border-border bg-surface">
               {day.rows.map((row) => (
                 <li key={row.id}>

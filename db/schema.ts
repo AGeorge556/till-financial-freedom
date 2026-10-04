@@ -39,6 +39,10 @@ const ownerOnly = (table: string) =>
 const createdAt = () => timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
 const updatedAt = () => timestamp("updated_at", { withTimezone: true }).notNull().defaultNow();
 
+/** Auto-lock options offered in Settings (null = off). The column itself accepts 1..120. */
+export const AUTO_LOCK_CHOICES = [1, 5, 15, 30] as const;
+export const DEFAULT_AUTO_LOCK_MINUTES = 5;
+
 export const accountType = pgEnum("account_type", [
   "bank",
   "cash",
@@ -105,6 +109,8 @@ export const userSettings = pgTable(
     remindGoal: boolean("remind_goal").notNull().default(true),
     remindBudget: boolean("remind_budget").notNull().default(true),
     remindSavings: boolean("remind_savings").notNull().default(true),
+    // Minutes of inactivity before the app signs out; null = never.
+    autoLockMinutes: integer("auto_lock_minutes").default(DEFAULT_AUTO_LOCK_MINUTES),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -122,6 +128,7 @@ export const userSettings = pgTable(
           and abs(target_stocks + target_gold + target_clouds + target_cash - 1) <= 0.00001)`,
     ),
     check("user_settings_insight_thresholds_check", sql`insight_min_percent >= 0 and insight_min_amount >= 0`),
+    check("user_settings_auto_lock_minutes_range", sql`auto_lock_minutes is null or auto_lock_minutes between 1 and 120`),
     ownerOnly("user_settings"),
   ],
 ).enableRLS();

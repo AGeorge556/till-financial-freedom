@@ -3,6 +3,7 @@ import Link from "next/link";
 import { EmptyState } from "@/components/EmptyState";
 import { GoalCard } from "@/components/GoalCard";
 import { NewGoalButton } from "@/components/GoalForms";
+import { Wide } from "@/components/Wide";
 import { requireUserId } from "@/lib/auth";
 import { loadGoalData } from "./data";
 
@@ -18,7 +19,7 @@ export default async function Page() {
   const nextPriority = Math.max(0, ...active.map((v) => v.goal.priority)) + 1;
 
   return (
-    <>
+    <Wide>
       <div className="flex items-center justify-between gap-3">
         <h1 className="text-3xl font-semibold tracking-tight">Goals</h1>
         <NewGoalButton nextPriority={nextPriority} />
@@ -45,10 +46,10 @@ export default async function Page() {
               A goal does not hold money. It earmarks part of what is already in your accounts. Projections are
               assumptions, not guarantees.
             </p>
-            <ul className="grid gap-4 md:grid-cols-2">
+            <ul className="grid gap-4 lg:grid-cols-2">
               {active.map((v) => (
                 <li key={v.goal.id}>
-                  <GoalCard view={v} />
+                  <GoalCard view={v} heading="h2" />
                 </li>
               ))}
             </ul>
@@ -70,6 +71,6 @@ export default async function Page() {
           </ul>
         </section>
       )}
-    </>
+    </Wide>
   );
 }

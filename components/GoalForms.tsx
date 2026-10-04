@@ -70,7 +70,7 @@ function GoalFields({ initial, priority, allowManual }: { initial?: GoalFormValu
                 onChange={() => setMode(value)}
                 className="peer sr-only"
               />
-              <span className="flex min-h-11 items-center justify-center rounded-xl border border-border px-2 text-center text-sm peer-checked:border-foreground peer-checked:bg-foreground peer-checked:text-background peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-foreground">
+              <span className="flex min-h-11 items-center justify-center rounded-xl border border-control px-2 text-center text-sm peer-checked:border-foreground peer-checked:bg-foreground peer-checked:text-background peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-foreground">
                 {text}
               </span>
             </label>
@@ -215,7 +215,7 @@ export function ArchiveGoalButton({ id, archived }: { id: string; archived: bool
         <>
           <input type="hidden" name="id" value={id} />
           <button type="submit" disabled={pending} className={`w-full ${secondaryBtn}`}>
-            {archived ? "Restore goal" : "Archive goal"}
+            {pending ? "Saving…" : archived ? "Restore goal" : "Archive goal"}
           </button>
         </>
       )}

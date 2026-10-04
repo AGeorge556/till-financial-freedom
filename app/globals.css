@@ -6,6 +6,8 @@
   --foreground: #1a1816;
   --muted: #625d57;
   --border: #e3dfd6;
+  /* Edge of inputs and choice chips: 3.9:1 on the page, 3.6:1 on cards (WCAG 1.4.11 wants 3:1). */
+  --control: #85807a;
   --cash: #0e7490;
   --investments: #4f46e5;
   --spending: #b45309;
@@ -22,6 +24,7 @@
     --foreground: #f2efe9;
     --muted: #a6a1ad;
     --border: #2e2b35;
+    --control: #77727f;
     --cash: #22d3ee;
     --investments: #818cf8;
     --spending: #fb923c;
@@ -38,6 +41,7 @@
   --color-foreground: var(--foreground);
   --color-muted: var(--muted);
   --color-border: var(--border);
+  --color-control: var(--control);
   --color-cash: var(--cash);
   --color-investments: var(--investments);
   --color-spending: var(--spending);
@@ -52,11 +56,42 @@ body {
   background: var(--background);
   color: var(--foreground);
   -webkit-tap-highlight-color: transparent;
+  /* A long account name or a huge amount wraps instead of pushing the page sideways. */
+  overflow-wrap: break-word;
 }
 
-:focus-visible {
-  outline: 2px solid var(--foreground);
-  outline-offset: 2px;
+::placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
+
+/* In the base layer so a utility such as outline-none or an offset still wins where a component needs it. */
+@layer base {
+  :focus-visible {
+    outline: 2px solid var(--foreground);
+    outline-offset: 2px;
+  }
+
+  /* Rounded lists clip their children, so the ring sits inside the row there. */
+  .overflow-hidden :focus-visible {
+    outline-offset: -2px;
+  }
+}
+
+/* Keeps the page behind an open sheet from scrolling on iOS (the sheet itself scrolls, see Sheet.tsx). */
+html:has(dialog[open]) {
+  overflow: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* Set pre-paint by the inline script in app/layout.tsx; cleared once PrivacyProvider hydrates. */

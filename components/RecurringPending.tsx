@@ -31,8 +31,8 @@ export function PendingRecurringRow({ item }: { item: PendingItem }) {
     <div className="px-4 py-3">
       <div className="flex items-start justify-between gap-3">
         <span className="min-w-0">
-          <span className="block truncate font-medium">{name}</span>
-          <span className="block truncate text-sm text-muted">
+          <span className="block break-words font-medium">{name}</span>
+          <span className="block break-words text-sm text-muted">
             Due {formatDay(item.date)} · {item.category ? `${item.category} · ` : ""}
             {item.account}
           </span>

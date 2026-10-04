@@ -16,7 +16,6 @@ const base = (over: Partial<ScenarioInput> = {}): ScenarioInput => ({
   monthlyInvestment: egp(5_000),
   returns: zero,
   startValues: { stocks: egp(10_000), gold: egp(5_000), clouds: egp(5_000), cash: egp(20_000) },
-  investSplit: null,
   liabilities: egp(10_000),
   years: 3,
   inflation: null,
@@ -49,7 +48,7 @@ describe("with 0% everywhere it is plain arithmetic", () => {
   });
 
   it("states the assumptions used", () => {
-    expect(r.used).toMatchObject({ monthlySavings: egp(8_000), monthlyInvestment: egp(5_000), splitSource: "current-mix", incomeGrowth: 0, inflation: null });
+    expect(r.used).toMatchObject({ monthlySavings: egp(8_000), monthlyInvestment: egp(5_000), incomeGrowth: 0, inflation: null });
     expect(r.used.investSplit).toEqual({ stocks: 0.5, gold: 0.25, clouds: 0.25 });
   });
 });
@@ -119,14 +118,7 @@ describe("income and savings", () => {
     expect(r.used.monthlyInvestment).toBe(0);
   });
 
-  it("allocation-rule weights replace the current mix", () => {
-    const r = projectScenario(base({ investSplit: { stocks: 0, gold: 1, clouds: 0 }, years: 1 }));
-    expect(r.rows[1].byClass.gold).toBe(egp(5_000 + 12 * 5_000));
-    expect(r.rows[1].byClass.stocks).toBe(egp(10_000));
-    expect(r.used.splitSource).toBe("rules");
-  });
-
-  it("with nothing held and no rules, the invested part goes to stocks", () => {
+  it("with nothing held, the invested part goes to stocks", () => {
     const r = projectScenario(base({ startValues: { stocks: 0, gold: 0, clouds: 0, cash: 0 }, years: 1 }));
     expect(r.rows[1].byClass.stocks).toBe(egp(60_000));
   });

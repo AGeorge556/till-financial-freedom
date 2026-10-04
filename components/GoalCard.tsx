@@ -175,19 +175,21 @@ export function GoalFigures({ view }: { view: GoalView }) {
   );
 }
 
-export function GoalCard({ view, compact }: { view: GoalView; compact?: boolean }) {
+/** `heading` is the level of the goal's name: h3 under a section heading (Home), h2 straight under the page title (Goals). */
+export function GoalCard({ view, compact, heading = "h3" }: { view: GoalView; compact?: boolean; heading?: "h2" | "h3" }) {
   const { goal, current } = view;
+  const Heading = heading;
   return (
     <article className={`relative p-5 ${card}`}>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <h3 className="text-lg font-semibold tracking-tight">
+        <Heading dir="auto" className="text-lg font-semibold tracking-tight">
           <Link
             href={`/goals/${goal.id}`}
             className="inline-flex min-h-11 items-center after:absolute after:inset-0 after:rounded-2xl"
           >
             {goal.name}
           </Link>
-        </h3>
+        </Heading>
         <GoalBadges view={view} />
       </div>
       {!compact && <p className="text-sm text-muted">Priority {goal.priority}</p>}

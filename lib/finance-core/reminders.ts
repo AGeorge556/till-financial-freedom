@@ -1,5 +1,5 @@
 import type { BudgetStatus } from "./budget";
-import type { TextPart } from "./insights";
+import { type PendingRecurring, pendingSentence, type TextPart } from "./insights";
 import type { Piasters } from "./money";
 import { daysBetween } from "./recurring";
 
@@ -23,7 +23,7 @@ export type ReminderInput = {
   month: { start: string; end: string };
   /** There is a finished financial month with data before this one. */
   previousMonthHasData: boolean;
-  pendingRecurring: { count: number; total: Piasters };
+  pendingRecurring: PendingRecurring;
   /** Investment or cloud values older than their stale limit. */
   staleCount: number;
   /** Active goals: planned and actually set aside this month. */
@@ -46,13 +46,7 @@ export function buildReminders(input: ReminderInput, switches: ReminderSwitches,
   }
 
   if (switches.recurring && input.pendingRecurring.count > 0) {
-    const { count, total } = input.pendingRecurring;
-    out.push({
-      id: "recurring",
-      kind: "recurring",
-      text: [txt(`${items(count, "recurring item is", "recurring items are")} waiting for you to confirm, `), amt(total), txt(" in total.")],
-      href: "/more/recurring",
-    });
+    out.push({ id: "recurring", kind: "recurring", text: pendingSentence(input.pendingRecurring), href: "/more/recurring" });
   }
 
   if (switches.stale && input.staleCount > 0) {

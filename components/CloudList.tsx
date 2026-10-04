@@ -18,16 +18,16 @@ function Status({ c }: { c: CloudView }) {
 
 const th = "px-4 py-3 font-medium";
 
-/** Savings Clouds: a card list on a phone, a table from 768px. Every value says whether it is estimated or confirmed. */
+/** Savings Clouds: a card list on a phone, a table from 1024px. Every value says whether it is estimated or confirmed. */
 export function CloudList({ clouds }: { clouds: CloudView[] }) {
   return (
     <>
-      <ul className="divide-y divide-border overflow-hidden rounded-2xl border border-border bg-surface md:hidden">
+      <ul className="divide-y divide-border overflow-hidden rounded-2xl border border-border bg-surface lg:hidden">
         {clouds.map((c) => (
           <li key={c.row.id}>
             <Link href={`/investments/${c.row.id}`} className="block min-h-14 px-4 py-3">
               <span className="flex items-baseline justify-between gap-3">
-                <span className="min-w-0 truncate font-medium">{c.row.name}</span>
+                <span className="min-w-0 break-words font-medium">{c.row.name}</span>
                 <span className="shrink-0 text-right">
                   <Amount value={c.est.value} className="font-medium" />
                   <span className="block text-xs text-muted">{c.est.label}</span>
@@ -46,7 +46,12 @@ export function CloudList({ clouds }: { clouds: CloudView[] }) {
           </li>
         ))}
       </ul>
-      <div className="hidden overflow-x-auto rounded-2xl border border-border bg-surface md:block">
+      <div
+        role="region"
+        aria-label="Savings Clouds, scrolls sideways"
+        tabIndex={0}
+        className="hidden overflow-x-auto rounded-2xl border border-border bg-surface lg:block"
+      >
         <table className="w-full text-sm">
           <caption className="sr-only">Savings Clouds</caption>
           <thead className="text-left text-muted">

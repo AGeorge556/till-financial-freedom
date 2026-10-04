@@ -128,7 +128,7 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
               a.kind === "cash" ? (
                 <li key={`cash-${a.accountId}`} className="flex items-start justify-between gap-3 px-4 py-3">
                   <span className="min-w-0">
-                    <span className="block truncate font-medium">
+                    <span className="block break-words font-medium">
                       {a.accountName}
                       {a.accountArchived ? " (archived)" : ""}
                     </span>
@@ -147,7 +147,7 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
               ) : (
                 <li key={`holding-${a.holdingId}`} className="flex items-start justify-between gap-3 px-4 py-3">
                   <span className="min-w-0">
-                    <span className="block truncate font-medium">
+                    <span className="block break-words font-medium">
                       {a.name}
                       {a.archived ? " (archived)" : ""}
                     </span>
@@ -219,7 +219,7 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
               <li key={e.id} className="flex items-center justify-between gap-3 px-4 py-3">
                 <span className="min-w-0">
                   <span className="block font-medium">{e.delta > 0 ? "Set aside" : "Released"}</span>
-                  <span className="block truncate text-sm text-muted">
+                  <span className="block break-words text-sm text-muted">
                     {formatDay(e.date)} ·{" "}
                     {e.holdingId
                       ? `${e.percentDelta ? `${sharePercentText(e.percentDelta.replace("-", ""))}% of ` : ""}${holdingName.get(e.holdingId) ?? "Unknown holding"}`

@@ -64,9 +64,11 @@ export type InsightInput = {
   budgets: { id: string; name: string; status: Pick<BudgetStatus, "level" | "budget" | "spent" | "percentUsed" | "projected"> }[];
   /** Stale investment values: how many, and what they are worth. */
   stale: { count: number; value: Piasters };
-  /** Recurring items waiting for confirmation. */
-  pending: { count: number; total: Piasters };
+  /** Recurring items waiting for confirmation: money out and money in are never added together. */
+  pending: PendingRecurring;
 };
+
+export type PendingRecurring = { count: number; expense: Piasters; income: Piasters };
 
 const amt = (value: Piasters): TextPart => ({ amount: value });
 const txt = (text: string): TextPart => ({ text });
@@ -290,6 +292,15 @@ function staleValues({ stale }: InsightInput): Insight[] {
   ];
 }
 
+/** "3 recurring items are waiting for you to confirm: 900 EGP of expenses and 500 EGP of income." Count only if neither total is above 0. */
+export function pendingSentence({ count, expense, income }: PendingRecurring): TextPart[] {
+  const parts: TextPart[] = [txt(`${plural(count, "recurring item is", "recurring items are")} waiting for you to confirm`)];
+  if (expense > 0) parts.push(txt(": "), amt(expense), txt(" of expenses"));
+  if (income > 0) parts.push(txt(expense > 0 ? " and " : ": "), amt(income), txt(" of income"));
+  parts.push(txt("."));
+  return parts;
+}
+
 function pendingRecurring({ pending }: InsightInput): Insight[] {
   if (pending.count <= 0) return [];
   return [
@@ -297,13 +308,15 @@ function pendingRecurring({ pending }: InsightInput): Insight[] {
       id: "pending-recurring",
       kind: "pending-recurring",
       severity: "info",
-      impact: pending.total,
-      text: [txt(`${plural(pending.count, "recurring item is", "recurring items are")} waiting for you to confirm, `), amt(pending.total), txt(" in total.")],
+      // Ranked by what is still to go out; incoming money is not a cost.
+      impact: pending.expense,
+      text: pendingSentence(pending),
       inputs: [
         { label: "Waiting items", value: pending.count, unit: "count" },
-        { label: "Total", value: pending.total, unit: "egp" },
+        { label: "Expenses", value: pending.expense, unit: "egp" },
+        { label: "Income", value: pending.income, unit: "egp" },
       ],
-      formula: "Recurring items that have come due and are still pending. Nothing counts toward balances or budgets until you confirm it.",
+      formula: "Recurring items that have come due and are still pending. Expenses and income are shown separately and never added together. Nothing counts toward balances or budgets until you confirm it.",
     },
   ];
 }

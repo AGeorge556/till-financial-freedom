@@ -61,7 +61,7 @@ export function AddLoanForm({ today }: { today: string }) {
             <input type="date" name="startDate" required defaultValue={today} className={field} />
           </Field>
           <Field label="Notes (optional, no amounts)" className="mt-4">
-            <input name="notes" maxLength={1000} className={field} />
+            <input name="notes" autoComplete="off" maxLength={1000} className={field} />
           </Field>
           <button type="submit" disabled={pending} className={`mt-6 ${primaryBtn}`}>
             {pending ? "Adding…" : "Add loan"}
@@ -170,7 +170,7 @@ export function PaymentForm({
             <input type="date" name="date" required defaultValue={today} className={field} />
           </Field>
           <Field label="Note (optional, no amounts)" className="mt-4">
-            <input name="note" maxLength={500} className={field} />
+            <input name="note" autoComplete="off" maxLength={500} className={field} />
           </Field>
           <button type="submit" disabled={pending} className={`mt-6 ${primaryBtn}`}>
             {pending ? "Saving…" : "Record payment"}
@@ -203,7 +203,7 @@ export function LiabilityUpdateForm({ liabilityId, today }: { liabilityId: strin
             <input type="date" name="date" required defaultValue={today} className={field} />
           </Field>
           <Field label="Note (optional, no amounts)" className="mt-4">
-            <input name="note" maxLength={500} className={field} />
+            <input name="note" autoComplete="off" maxLength={500} className={field} />
           </Field>
           <button type="submit" disabled={pending} className={`mt-6 ${primaryBtn}`}>
             {pending ? "Saving…" : "Save update"}
@@ -237,7 +237,7 @@ export function EditLoanForm({
         <>
           <input type="hidden" name="id" value={id} />
           <Field label="Name">
-            <input name="name" required maxLength={80} defaultValue={name} className={field} />
+            <input name="name" autoComplete="off" required maxLength={80} defaultValue={name} className={field} />
           </Field>
           <KindSelect defaultValue={kind} />
           <Field label="Yearly interest rate in % (optional)" className="mt-4">
@@ -247,7 +247,7 @@ export function EditLoanForm({
             <input type="date" name="startDate" required defaultValue={startDate} className={field} />
           </Field>
           <Field label="Notes (optional, no amounts)" className="mt-4">
-            <input name="notes" maxLength={1000} defaultValue={notes ?? ""} className={field} />
+            <input name="notes" autoComplete="off" maxLength={1000} defaultValue={notes ?? ""} className={field} />
           </Field>
           <p className="mt-2 text-sm text-muted">Notes show even when amounts are hidden, so keep numbers out of them.</p>
           <button type="submit" disabled={pending} className={`mt-5 ${primaryBtn}`}>
@@ -267,7 +267,7 @@ export function LiabilityArchiveButton({ id, archived, canArchive }: { id: strin
         <>
           <input type="hidden" name="id" value={id} />
           <button type="submit" disabled={pending || (!archived && !canArchive)} className={`w-full ${secondaryBtn}`}>
-            {archived ? "Restore loan" : "Archive loan"}
+            {pending ? "Saving…" : archived ? "Restore loan" : "Archive loan"}
           </button>
         </>
       )}
@@ -275,7 +275,7 @@ export function LiabilityArchiveButton({ id, archived, canArchive }: { id: strin
   );
 }
 
-export function LiabilityVoidButton({ id }: { id: string }) {
+export function LiabilityVoidButton({ id, what }: { id: string; what: string }) {
   return (
     <Form action={voidPayment} confirm="Void this payment? It stays in your history but stops counting. The principal and the interest are both voided, and your cash balance is corrected.">
       {({ pending }) => (
@@ -283,6 +283,7 @@ export function LiabilityVoidButton({ id }: { id: string }) {
           <input type="hidden" name="id" value={id} />
           <button type="submit" disabled={pending} className="min-h-11 rounded-xl px-3 text-sm font-medium text-negative disabled:opacity-60">
             {pending ? "Voiding…" : "Void"}
+            <span className="sr-only"> {what}</span>
           </button>
         </>
       )}

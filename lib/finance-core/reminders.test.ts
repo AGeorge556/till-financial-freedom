@@ -10,7 +10,7 @@ const off = (...k: ReminderKind[]): ReminderSwitches => ({ ...ALL_ON, ...Object.
 const nothing = (over: Partial<ReminderInput> = {}): ReminderInput => ({
   month: MONTH,
   previousMonthHasData: false,
-  pendingRecurring: { count: 0, total: 0 },
+  pendingRecurring: { count: 0, expense: 0, income: 0 },
   staleCount: 0,
   goals: [],
   budgets: [],
@@ -21,7 +21,7 @@ const nothing = (over: Partial<ReminderInput> = {}): ReminderInput => ({
 const everything = (): ReminderInput =>
   nothing({
     previousMonthHasData: true,
-    pendingRecurring: { count: 2, total: egp(700) },
+    pendingRecurring: { count: 2, expense: egp(700), income: 0 },
     staleCount: 3,
     goals: [{ id: "car", name: "Car", planned: egp(2_000), actual: egp(500) }],
     budgets: [{ id: "food", name: "Food", status: { level: "over", spent: egp(1_300), budget: egp(1_000), percentUsed: 1.3 } }],
@@ -110,8 +110,13 @@ describe("date boundaries", () => {
 describe("other conditions", () => {
   it("recurring: only with waiting items; singular and plural", () => {
     expect(run(nothing(), "2026-04-25")).toEqual([]);
-    expect(run(nothing({ pendingRecurring: { count: 1, total: egp(5) } }), "2026-04-25")[0].text[0]).toEqual({ text: "1 recurring item is waiting for you to confirm, " });
-    expect(run(nothing({ pendingRecurring: { count: 4, total: egp(5) } }), "2026-04-25")[0].text[0]).toEqual({ text: "4 recurring items are waiting for you to confirm, " });
+    expect(run(nothing({ pendingRecurring: { count: 1, expense: egp(5), income: 0 } }), "2026-04-25")[0].text[0]).toEqual({ text: "1 recurring item is waiting for you to confirm" });
+    expect(run(nothing({ pendingRecurring: { count: 4, expense: egp(5), income: 0 } }), "2026-04-25")[0].text[0]).toEqual({ text: "4 recurring items are waiting for you to confirm" });
+  });
+
+  it("recurring: expense and income are separate amounts, never one total", () => {
+    const [r] = run(nothing({ pendingRecurring: { count: 2, expense: egp(5), income: egp(7) } }), "2026-04-25");
+    expect(r.text.filter((p) => "amount" in p)).toEqual([{ amount: egp(5) }, { amount: egp(7) }]);
   });
 
   it("stale: only with stale values", () => {

@@ -1,11 +1,12 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { signOut } from "@/app/login/actions";
+import { SignOutButton } from "@/components/AutoLock";
 
 export const metadata: Metadata = { title: "More" };
 
 const links = [
   { href: "/more/review", title: "Monthly review", hint: "How the month went: saved, invested, net worth change" },
+  { href: "/more/income", title: "Income", hint: "What you earn, where it comes from, and how it is growing" },
   { href: "/more/history", title: "Net worth history", hint: "Net worth, cash, investments and debt over time" },
   { href: "/more/scenarios", title: "What if", hint: "Try a different income, saving or return and see where it leads" },
   { href: "/more/reports", title: "Reports", hint: "One place to find every report" },
@@ -14,6 +15,7 @@ const links = [
   { href: "/more/accounts", title: "Accounts", hint: "Balances, add or archive an account" },
   { href: "/more/liabilities", title: "Loans", hint: "Loans and money you owe, payments" },
   { href: "/more/categories", title: "Categories", hint: "What you spend on and earn from" },
+  { href: "/more/settings", title: "Settings", hint: "The day your month starts, and auto-lock" },
   { href: "/more/assumptions", title: "Assumptions", hint: "Expected returns, gold prices and when a value counts as old" },
   { href: "/more/reminders", title: "Reminders and insights", hint: "Which reminders show on Home, and how small a change to hide" },
   { href: "/more/backup", title: "Backup", hint: "Save a copy of your data" },
@@ -38,11 +40,7 @@ export default function Page() {
           </li>
         ))}
       </ul>
-      <form action={signOut} className="mt-6">
-        <button type="submit" className="min-h-11 w-full rounded-xl border border-border px-4 font-medium">
-          Sign out
-        </button>
-      </form>
+      <SignOutButton />
     </>
   );
 }

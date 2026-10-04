@@ -46,6 +46,7 @@ export function BudgetForm({
               </Field>
               <button type="submit" disabled={pending} className={save}>
                 {pending ? "Saving…" : "Save"}
+                <span className="sr-only"> {label}</span>
               </button>
             </div>
             {saved(done)}
@@ -59,6 +60,7 @@ export function BudgetForm({
               <input type="hidden" name="id" value={current.id} />
               <button type="submit" disabled={pending} className="mt-1 min-h-11 text-sm text-negative underline disabled:opacity-60">
                 {pending ? "Removing…" : "Remove budget"}
+                <span className="sr-only"> {label}</span>
               </button>
             </>
           )}
