@@ -678,3 +678,21 @@ export const allocationOverrides = pgTable(
     ownerOnly("allocation_overrides"),
   ],
 ).enableRLS();
+
+// One row per browser that turned notifications on. Per device, so it is not part of the backup (docs/schema-phase-7.md).
+export const pushSubscriptions = pgTable(
+  "push_subscriptions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: userId(),
+    endpoint: text("endpoint").notNull().unique(),
+    p256dh: text("p256dh").notNull(),
+    auth: text("auth").notNull(),
+    // A short device description from the user agent, like "iPhone". Never an address or a place.
+    label: text("label"),
+    createdAt: createdAt(),
+    lastSuccessAt: timestamp("last_success_at", { withTimezone: true }),
+    failureCount: integer("failure_count").notNull().default(0),
+  },
+  (t) => [index("push_subscriptions_user_idx").on(t.userId), ownerOnly("push_subscriptions")],
+).enableRLS();

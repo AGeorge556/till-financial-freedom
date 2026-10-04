@@ -1,5 +1,5 @@
 import "server-only";
-import { and, asc, desc, eq, gte, isNotNull, isNull, lte, min } from "drizzle-orm";
+import { and, asc, desc, eq, gte, isNotNull, isNull, lte, min, sql } from "drizzle-orm";
 import { cache } from "react";
 import type { GoalData } from "@/app/(app)/goals/data";
 import type { BudgetLine } from "@/app/(app)/spending/data";
@@ -53,6 +53,7 @@ import {
   liabilities,
   liabilityUpdates,
   priceUpdates,
+  pushSubscriptions,
   rateHistory,
   recurringTemplates,
   transactions,
@@ -1388,4 +1389,66 @@ export async function loadScenarioDefaults(
     returnsMissing: MIX_CLASSES.filter((c) => assumed[c] === null),
     stale: wealth.valuation.stale,
   };
+}
+
+// ---- Phase 7: push subscriptions (one per device; not part of the backup) ----
+
+/** Adds or refreshes a device. False when that endpoint already belongs to another account (nothing is changed). */
+export async function savePushSubscription(
+  userId: string,
+  sub: { endpoint: string; p256dh: string; auth: string; label: string },
+): Promise<boolean> {
+  const rows = await db
+    .insert(pushSubscriptions)
+    .values({ userId, ...sub })
+    .onConflictDoUpdate({
+      target: pushSubscriptions.endpoint,
+      set: { p256dh: sub.p256dh, auth: sub.auth, label: sub.label, failureCount: 0 },
+      setWhere: eq(pushSubscriptions.userId, userId),
+    })
+    .returning({ id: pushSubscriptions.id });
+  return rows.length > 0;
+}
+
+export async function deletePushSubscription(userId: string, endpoint: string): Promise<void> {
+  await db.delete(pushSubscriptions).where(and(eq(pushSubscriptions.userId, userId), eq(pushSubscriptions.endpoint, endpoint)));
+}
+
+export async function listPushSubscriptions(userId: string) {
+  return db
+    .select({
+      id: pushSubscriptions.id,
+      endpoint: pushSubscriptions.endpoint,
+      p256dh: pushSubscriptions.p256dh,
+      auth: pushSubscriptions.auth,
+    })
+    .from(pushSubscriptions)
+    .where(eq(pushSubscriptions.userId, userId));
+}
+
+/** Every user with a device: the one read that is not for a signed-in user, used only by the daily reminders job. */
+export async function listUsersWithPush(): Promise<string[]> {
+  const rows = await db.selectDistinct({ userId: pushSubscriptions.userId }).from(pushSubscriptions);
+  return rows.map((r) => r.userId);
+}
+
+export async function recordPushSuccess(userId: string, id: string): Promise<void> {
+  await db
+    .update(pushSubscriptions)
+    .set({ lastSuccessAt: new Date(), failureCount: 0 })
+    .where(and(eq(pushSubscriptions.userId, userId), eq(pushSubscriptions.id, id)));
+}
+
+/** Counts one failed send and returns the failures in a row so far (0 if the device is already gone). */
+export async function recordPushFailure(userId: string, id: string): Promise<number> {
+  const rows = await db
+    .update(pushSubscriptions)
+    .set({ failureCount: sql`${pushSubscriptions.failureCount} + 1` })
+    .where(and(eq(pushSubscriptions.userId, userId), eq(pushSubscriptions.id, id)))
+    .returning({ failures: pushSubscriptions.failureCount });
+  return rows[0]?.failures ?? 0;
+}
+
+export async function deletePushSubscriptionById(userId: string, id: string): Promise<void> {
+  await db.delete(pushSubscriptions).where(and(eq(pushSubscriptions.userId, userId), eq(pushSubscriptions.id, id)));
 }

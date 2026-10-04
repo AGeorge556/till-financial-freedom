@@ -27,7 +27,7 @@ export default async function Icon({ id }: { id: Promise<string | number> }) {
           color: "#f7f5f0",
         }}
       >
-        <div style={{ fontSize: s * 0.42, fontWeight: 700, lineHeight: 1 }}>T</div>
+        <div style={{ fontSize: s * 0.26, fontWeight: 700, lineHeight: 1, letterSpacing: s * -0.01 }}>TFF</div>
         <div style={{ width: s * 0.22, height: s * 0.035, marginTop: s * 0.03, background: "#22d3ee" }} />
       </div>
     ),

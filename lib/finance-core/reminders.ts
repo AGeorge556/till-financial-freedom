@@ -4,7 +4,7 @@ import type { Piasters } from "./money";
 import { daysBetween } from "./recurring";
 
 /**
- * In-app reminders, worked out on every load (no push). Each is a sentence (amounts as parts, so privacy mode hides them)
+ * Reminders, worked out on every load (the daily push only says which kinds, see pushSummary). Each is a sentence (amounts as parts, so privacy mode hides them)
  * and a link. Each kind has its own switch in settings.
  */
 export type ReminderKind = "review" | "recurring" | "stale" | "goal" | "budget" | "savings";
@@ -98,4 +98,41 @@ export function buildReminders(input: ReminderInput, switches: ReminderSwitches,
   }
 
   return out;
+}
+
+const KIND_ORDER: ReminderKind[] = ["review", "recurring", "stale", "goal", "budget", "savings"];
+
+const phrase = (kind: ReminderKind, n: number): string => {
+  switch (kind) {
+    case "review":
+      return "last month's review is ready";
+    case "recurring":
+      return "recurring items to confirm";
+    case "stale":
+      return "your investment values are out of date";
+    case "goal":
+      return n === 1 ? "a goal contribution is due" : `${n} goal contributions are due`;
+    case "budget":
+      return n === 1 ? "a budget is near or over its limit" : `${n} budgets are near or over their limit`;
+    case "savings":
+      return "last month's saving was below your target";
+  }
+};
+
+/**
+ * The text of the daily push notification. It appears on a locked screen, so it holds only kinds of reminder and how
+ * many: no amounts, balances, names or notes. null when there is nothing to say, so an empty notification is never sent.
+ */
+export function pushSummary(reminders: Reminder[]): { title: string; body: string } | null {
+  const phrases = KIND_ORDER.flatMap((kind) => {
+    const n = reminders.filter((r) => r.kind === kind).length;
+    return n > 0 ? [phrase(kind, n)] : [];
+  });
+  if (phrases.length === 0) return null;
+
+  const body = phrases.join(" - ");
+  return {
+    title: `TFF: ${phrases.length} ${phrases.length === 1 ? "thing needs" : "things need"} a look`,
+    body: body[0].toUpperCase() + body.slice(1),
+  };
 }

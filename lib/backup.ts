@@ -1392,7 +1392,7 @@ function listSince(root: Obj, key: string, version: number, since: number): unkn
 }
 
 function build(input: unknown): Backup {
-  if (!isObj(input)) throw new BackupError("Not a Till backup: the file must contain a JSON object.");
+  if (!isObj(input)) throw new BackupError("Not a TFF backup: the file must contain a JSON object.");
   const version = input.version;
   if (typeof version !== "number" || !Number.isInteger(version) || version < OLDEST_VERSION || version > BACKUP_VERSION) {
     bad("version", `${JSON.stringify(version)} is not supported (this app reads versions ${OLDEST_VERSION} to ${BACKUP_VERSION})`);
