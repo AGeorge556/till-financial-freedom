@@ -54,6 +54,23 @@ export async function setAssumptions(_prev: ActionState, formData: FormData): Pr
   return {};
 }
 
+/** Yearly growth of income for the scenario calculator (a percent above -100, like 5). Blank clears it. */
+export async function setIncomeGrowth(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  const userId = await requireUserId();
+  const text = str(formData, "incomeGrowth");
+  const rate = text === "" ? null : percentToRate(text);
+  if (text !== "" && (rate === null || Number(rate) <= -1)) {
+    return { error: "Enter the yearly growth as a percent above -100 and up to 1000, like 5 or 7.5, or leave it blank." };
+  }
+
+  await db
+    .insert(financialAssumptions)
+    .values({ userId, incomeGrowth: rate })
+    .onConflictDoUpdate({ target: financialAssumptions.userId, set: { incomeGrowth: rate, updatedAt: new Date() } });
+  revalidatePath("/", "layout");
+  return {};
+}
+
 // user_settings may not exist yet, so these upsert, like settings.ts.
 async function saveSettings(userId: string, set: Partial<typeof userSettings.$inferInsert>): Promise<ActionState> {
   await db

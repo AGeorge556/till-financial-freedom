@@ -1,9 +1,19 @@
 import "server-only";
 import { and, asc, desc, eq, gte, isNotNull, isNull, lte, min } from "drizzle-orm";
+import type { GoalData } from "@/app/(app)/goals/data";
+import type { BudgetLine } from "@/app/(app)/spending/data";
 import type { SavingsTargetMode } from "@/lib/finance-core/allocation";
-import { fullMonths, monthTotals } from "@/lib/finance-core/analytics";
+import {
+  DEFAULT_NOTABLE_AMOUNT,
+  DEFAULT_NOTABLE_PERCENT,
+  fullMonths,
+  monthTotals,
+  trailingAverage,
+} from "@/lib/finance-core/analytics";
 import { DEFAULT_BUDGET_ALERT_AT, DEFAULT_BUDGET_WARN_AT } from "@/lib/finance-core/budget";
-import { accountBalance, netWorth, type Tx } from "@/lib/finance-core/ledger";
+import { type HistoryData, type HistoryPoint, MAX_POINTS, seriesFromSnapshots, snapshotsAsOf } from "@/lib/finance-core/history";
+import type { InsightInput } from "@/lib/finance-core/insights";
+import { accountBalance, filterByDateRange, netWorth, periodSummary, type Tx } from "@/lib/finance-core/ledger";
 import type { Piasters } from "@/lib/finance-core/money";
 import {
   apyAsOf,
@@ -17,8 +27,11 @@ import { DEFAULT_STALE_DAYS_GOLD, type GoldPrice, type GoldPriceMode, goldPrices
 import { holdingFreeShare } from "@/lib/finance-core/goals";
 import { outstanding } from "@/lib/finance-core/liabilities";
 import { DEFAULT_STALE_DAYS, type HoldingEvent, type PriceUpdate, portfolioValue } from "@/lib/finance-core/portfolio";
-import { missingOccurrences, type RecurringRow, type RecurringTemplate } from "@/lib/finance-core/recurring";
-import { cairoToday } from "@/lib/finance-core/time";
+import { mix, MIX_CLASSES, type MixClass, type Targets } from "@/lib/finance-core/portfolioMix";
+import { addDays, missingOccurrences, type RecurringRow, type RecurringTemplate } from "@/lib/finance-core/recurring";
+import type { ReminderInput, ReminderSwitches } from "@/lib/finance-core/reminders";
+import type { ScenarioInput } from "@/lib/finance-core/scenario";
+import { cairoToday, financialMonth } from "@/lib/finance-core/time";
 import { eventsByHolding, type LedgerEvent, toHoldingEvents } from "@/lib/backup";
 import { db } from "./index";
 import {
@@ -145,6 +158,8 @@ export type Assumptions = {
   savingsCloudApy: number | null;
   cashReturn: number | null;
   inflation: number | null;
+  /** Yearly growth of income for the scenario calculator. */
+  incomeGrowth: number | null;
 };
 
 const toGoalRow = (r: typeof goals.$inferSelect): GoalRow => ({
@@ -233,6 +248,7 @@ export async function getAssumptions(userId: string): Promise<Assumptions> {
     savingsCloudApy: rateOrNull(row?.savingsCloudApy ?? null),
     cashReturn: rateOrNull(row?.cashReturn ?? null),
     inflation: rateOrNull(row?.inflation ?? null),
+    incomeGrowth: rateOrNull(row?.incomeGrowth ?? null),
   };
 }
 
@@ -864,7 +880,16 @@ export async function loadMonth(userId: string, range: { start: string; end: str
     listAllocationEvents(userId, { from: range.start, to: range.end }),
     listRecurringTemplates(userId, { activeOnly: true }),
     db
-      .select({ templateId: transactions.recurringTemplateId, dueDate: transactions.recurringDueDate, status: transactions.status })
+      .select({
+        templateId: transactions.recurringTemplateId,
+        dueDate: transactions.recurringDueDate,
+        status: transactions.status,
+        type: transactions.type,
+        amount: transactions.amount,
+        categoryId: transactions.categoryId,
+        fromAccountId: transactions.fromAccountId,
+        toAccountId: transactions.toAccountId,
+      })
       .from(transactions)
       .where(
         and(
@@ -881,7 +906,20 @@ export async function loadMonth(userId: string, range: { start: string; end: str
     liabilityUpdates: updates,
     allocationEvents,
     templates: templates.map(toTemplate),
-    occurrences: occurrences.map((o) => ({ templateId: o.templateId!, dueDate: o.dueDate!, status: o.status })),
+    // A pending row carries its own figures: the person may have edited it, and its template may be paused or gone.
+    occurrences: occurrences.map((o): RecurringRow =>
+      o.status === "pending"
+        ? {
+            templateId: o.templateId!,
+            dueDate: o.dueDate!,
+            status: "pending",
+            type: o.type as "INCOME" | "EXPENSE", // pending rows come from templates: recurring_templates_type_check
+            amount: o.amount,
+            categoryId: o.categoryId,
+            accountId: (o.type === "INCOME" ? o.toAccountId : o.fromAccountId)!,
+          }
+        : { templateId: o.templateId!, dueDate: o.dueDate!, status: o.status },
+    ),
   };
 }
 
@@ -920,12 +958,8 @@ export async function essentialMonthlyTotals(userId: string, today: string, mont
 
 export type NetWorthSnapshot = { date: string; cash: Piasters; holdings: Piasters; liabilities: Piasters; netWorth: Piasters };
 
-/**
- * Net worth as of each date (cash + holdings, gold and clouds - liabilities), from one load of the user's records.
- * Records dated after a date are ignored: ledger rows, prices, confirmations, rate changes, loan updates and payments.
- * An account's opening balance and a loan's opening balance count from the start (neither has an effective date).
- */
-export async function loadNetWorthSnapshots(userId: string, dates: string[]): Promise<NetWorthSnapshot[]> {
+/** Everything a replay of the past needs, read once however many dates are evaluated. */
+async function readLedgerWorld(userId: string) {
   const [accountRows, txRows, portfolio, liabilityRows, updates, liabilityTxs] = await Promise.all([
     listAccounts(userId, { includeArchived: true }),
     listTransactions(userId),
@@ -934,6 +968,16 @@ export async function loadNetWorthSnapshots(userId: string, dates: string[]): Pr
     listLiabilityUpdates(userId),
     listLiabilityTransactions(userId),
   ]);
+  return { accountRows, txRows, portfolio, liabilityRows, updates, liabilityTxs };
+}
+
+/**
+ * Net worth as of each date (cash + holdings, gold and clouds - liabilities), from one load of the user's records.
+ * Records dated after a date are ignored: ledger rows, prices, confirmations, rate changes, loan updates and payments.
+ * An account's opening balance and a loan's opening balance count from the start (neither has an effective date).
+ */
+export async function loadNetWorthSnapshots(userId: string, dates: string[]): Promise<NetWorthSnapshot[]> {
+  const { accountRows, txRows, portfolio, liabilityRows, updates, liabilityTxs } = await readLedgerWorld(userId);
   const ledger = txRows.map(toLedgerTx);
   return dates.map((date) => {
     const upTo = ledger.filter((t) => t.date <= date);
@@ -997,6 +1041,7 @@ export async function loadBackupRows(userId: string) {
   const settings = {
     ...(await getSettings(userId)),
     ...(await getPlanSettings(userId)),
+    ...(await readInsightSettings(userId)),
     staleDaysHoldings: await getStaleDays(userId),
     budgetWarnAt: thresholds.warnAt,
     budgetAlertAt: thresholds.alertAt,
@@ -1011,5 +1056,315 @@ export async function loadBackupRows(userId: string) {
     recurringTemplates: templateRows,
     ...planning,
     ...investments,
+  };
+}
+
+// ---- Phase 5b: history, allocation, insights, scenario defaults, reminders ----
+
+/** The settings columns phase 5b added, flat and in the shape the backup stores them. */
+async function readInsightSettings(userId: string) {
+  const [row] = await db
+    .select({
+      targetStocks: userSettings.targetStocks,
+      targetGold: userSettings.targetGold,
+      targetClouds: userSettings.targetClouds,
+      targetCash: userSettings.targetCash,
+      insightMinPercent: userSettings.insightMinPercent,
+      insightMinAmount: userSettings.insightMinAmount,
+      remindReview: userSettings.remindReview,
+      remindRecurring: userSettings.remindRecurring,
+      remindStale: userSettings.remindStale,
+      remindGoal: userSettings.remindGoal,
+      remindBudget: userSettings.remindBudget,
+      remindSavings: userSettings.remindSavings,
+    })
+    .from(userSettings)
+    .where(eq(userSettings.userId, userId));
+  return {
+    targetStocks: rateOrNull(row?.targetStocks ?? null),
+    targetGold: rateOrNull(row?.targetGold ?? null),
+    targetClouds: rateOrNull(row?.targetClouds ?? null),
+    targetCash: rateOrNull(row?.targetCash ?? null),
+    insightMinPercent: row ? Number(row.insightMinPercent) : DEFAULT_NOTABLE_PERCENT,
+    insightMinAmount: row?.insightMinAmount ?? DEFAULT_NOTABLE_AMOUNT,
+    remindReview: row?.remindReview ?? true,
+    remindRecurring: row?.remindRecurring ?? true,
+    remindStale: row?.remindStale ?? true,
+    remindGoal: row?.remindGoal ?? true,
+    remindBudget: row?.remindBudget ?? true,
+    remindSavings: row?.remindSavings ?? true,
+  };
+}
+
+type InsightSettings = Awaited<ReturnType<typeof readInsightSettings>>;
+
+const targetsOf = (s: InsightSettings): Targets | null =>
+  s.targetStocks === null || s.targetGold === null || s.targetClouds === null || s.targetCash === null
+    ? null
+    : { stocks: s.targetStocks, gold: s.targetGold, clouds: s.targetClouds, cash: s.targetCash };
+
+const thresholdsOf = (s: InsightSettings) => ({ percent: s.insightMinPercent, amount: s.insightMinAmount });
+
+const switchesOf = (s: InsightSettings): ReminderSwitches => ({
+  review: s.remindReview,
+  recurring: s.remindRecurring,
+  stale: s.remindStale,
+  goal: s.remindGoal,
+  budget: s.remindBudget,
+  savings: s.remindSavings,
+});
+
+/** The target share of each class (decimals), or null when none is set. */
+export async function getPortfolioTargets(userId: string): Promise<Targets | null> {
+  return targetsOf(await readInsightSettings(userId));
+}
+
+/** A spending change is an insight only if it reaches both: a share (0.15 = 15%) and an amount in piasters. */
+export async function getInsightThresholds(userId: string): Promise<{ percent: number; amount: Piasters }> {
+  return thresholdsOf(await readInsightSettings(userId));
+}
+
+/** Every reminder kind is on until the user switches it off. */
+export async function getReminderSwitches(userId: string): Promise<ReminderSwitches> {
+  return switchesOf(await readInsightSettings(userId));
+}
+
+/**
+ * Net worth, cash, investments and debt as of each date (at most MAX_POINTS), replayed from one load of the user's
+ * records (H1): nothing is stored, so a back-dated record changes the past by itself. Pass samplingDates(...) for a range.
+ */
+export async function loadHistory(userId: string, dates: string[]): Promise<HistoryPoint[]> {
+  if (dates.length > MAX_POINTS) throw new RangeError(`History is limited to ${MAX_POINTS} dates per request`);
+  const { accountRows, txRows, portfolio, liabilityRows, updates, liabilityTxs } = await readLedgerWorld(userId);
+  const data: HistoryData = {
+    accounts: accountRows.map((a) => ({ id: a.id, opening: a.openingBalance, creditCard: a.type === "credit_card" })),
+    txs: txRows.map(toLedgerTx),
+    liabilities: liabilityRows.map((l) => ({
+      opening: l.openingBalance,
+      updates: updates.filter((u) => u.liabilityId === l.id).map((u) => ({ date: u.date, delta: u.delta })),
+      payments: liabilityTxs
+        .filter((t) => t.liabilityId === l.id && t.type === "LIABILITY_PAYMENT" && t.status === "posted")
+        .map((t) => ({ date: t.date, amount: t.amount })),
+    })),
+    investmentsAt: (date) => {
+      const v = valuePortfolio(portfolio, date);
+      return { total: v.total, stale: v.stale };
+    },
+  };
+  return seriesFromSnapshots(snapshotsAsOf(data, dates));
+}
+
+/**
+ * What each asset class is worth now. Cash is every account that is not a credit card plus a positive card balance;
+ * a negative card balance is `cardDebt` (a positive figure). Archived accounts still hold money, so they count.
+ */
+export function classValues(
+  wealth: Pick<WealthData, "valuation" | "portfolio">,
+  accountRows: Pick<AccountRow, "id" | "type">[],
+  balances: Map<string, Piasters>,
+): { values: Record<MixClass, Piasters>; cardDebt: Piasters } {
+  const kindOf = new Map(wealth.portfolio.holdings.map((h) => [h.id, h.kind]));
+  const gold = wealth.valuation.lines.filter((l) => kindOf.get(l.id) === "gold").reduce((s, l) => s + l.value, 0);
+  const stocks = wealth.valuation.lines.reduce((s, l) => s + l.value, 0) - gold;
+  const clouds = wealth.valuation.clouds.reduce((s, c) => s + c.value, 0);
+  let cash = 0;
+  let cardDebt = 0;
+  for (const a of accountRows) {
+    const b = balances.get(a.id) ?? 0;
+    if (a.type !== "credit_card" || b >= 0) cash += b;
+    else cardDebt -= b;
+  }
+  return { values: { stocks, gold, clouds, cash }, cardDebt };
+}
+
+/** Investment values past their stale limit: how many and what they are worth. */
+function staleOf(valuation: PortfolioValuation): { count: number; value: Piasters } {
+  const stale = [...valuation.lines.filter((l) => l.stale), ...valuation.clouds.filter((c) => c.stale)];
+  return { count: stale.length, value: stale.reduce((s, x) => s + x.value, 0) };
+}
+
+const sumOf = (xs: number[]) => xs.reduce((s, x) => s + x, 0);
+
+const firstPosted = (rows: Pick<TransactionRow, "status" | "date">[]): string | null =>
+  rows.reduce<string | null>((min, r) => (r.status !== "posted" || (min !== null && min <= r.date) ? min : r.date), null);
+
+/**
+ * What the planning loaders cannot read for themselves: the goal and budget figures the caller already worked out
+ * (Home does), and any rows it already read, which are then not read again.
+ */
+export type PlanningContext = {
+  goalData: GoalData;
+  budgets: BudgetLine[];
+  accounts?: AccountRow[];
+  txRows?: TransactionRow[];
+  wealth?: WealthData;
+};
+
+const activeGoals = (goalData: GoalData) => goalData.goals.filter((v) => !v.goal.archivedAt);
+
+/** Everything buildInsights needs. Its own reads are the settings, categories, pending items and whatever the context lacks. */
+export async function loadInsightInput(userId: string, ctx: PlanningContext): Promise<InsightInput> {
+  const { goalData } = ctx;
+  const { today, startDay } = goalData;
+  const [settings, categoryRows, pendingRows, accountRows, txRows, wealth] = await Promise.all([
+    readInsightSettings(userId),
+    listCategories(userId, { includeArchived: true }),
+    listPendingRecurring(userId),
+    ctx.accounts ?? listAccounts(userId, { includeArchived: true }),
+    ctx.txRows ?? listTransactions(userId),
+    ctx.wealth ?? loadWealth(userId, today),
+  ]);
+
+  const ledger = txRows.map(toLedgerTx);
+  const ranges = fullMonths(firstPosted(txRows), today, startDay, 4);
+  const earlierMonths = ranges.slice(-3);
+  const cashAccounts = accountRows.filter((a) => !a.isInvestment && a.type !== "credit_card");
+  const cashAt = (date: string) =>
+    sumOf(cashAccounts.map((a) => accountBalance(a.openingBalance, a.id, ledger.filter((t) => t.date <= date))));
+  const months = ranges.map((r) => {
+    const s = periodSummary(filterByDateRange(ledger, r.start, r.end));
+    return { saved: s.savings, cashChange: cashAt(r.end) - cashAt(addDays(r.start, -1)), invested: s.netInvested };
+  });
+  const windowStart = earlierMonths.length > 0 ? earlierMonths[0].start : goalData.month.start;
+
+  const { values } = classValues(wealth, accountRows, accountBalances(accountRows, txRows));
+  return {
+    today,
+    thresholds: thresholdsOf(settings),
+    spending: {
+      txs: txRows.filter((r) => r.date >= windowStart && r.date <= goalData.month.end).map(toAnalyticsTx),
+      currentMonth: goalData.month,
+      earlierMonths,
+      categoryNames: Object.fromEntries(categoryRows.map((c) => [c.id, c.name])),
+    },
+    months,
+    // In flexible mode the "target" is just capacity, not something the owner set, so there is nothing to miss.
+    savingsTarget: goalData.settings.savingsTargetMode !== "flexible" && goalData.plan.target > 0 ? goalData.plan.target : null,
+    goals: activeGoals(goalData).map((v) => ({
+      id: v.goal.id,
+      name: v.goal.name,
+      onTrack: v.projection.onTrack,
+      monthsLate: v.projection.monthsLate,
+      gap: v.projection.gap,
+    })),
+    mix: mix(values),
+    budgets: ctx.budgets.map((b) => ({ id: b.id, name: b.categoryId ? b.name : "overall", status: b.status })),
+    stale: staleOf(wealth.valuation),
+    pending: { count: pendingRows.length, total: sumOf(pendingRows.map((r) => r.amount)) },
+  };
+}
+
+/** The reminder input, from the same context as the insights. buildReminders applies the switches (getReminderSwitches). */
+export async function loadReminderInput(userId: string, ctx: PlanningContext): Promise<ReminderInput> {
+  const { goalData } = ctx;
+  const { today, startDay, month } = goalData;
+  const [pendingRows, txRows, wealth] = await Promise.all([
+    listPendingRecurring(userId),
+    ctx.txRows ?? listTransactions(userId),
+    ctx.wealth ?? loadWealth(userId, today),
+  ]);
+
+  const previous = financialMonth(addDays(month.start, -1), startDay);
+  const last = fullMonths(firstPosted(txRows), today, startDay, 1)[0];
+  // Flexible mode has no target the owner set; 0 switches the reminder off.
+  const target = goalData.settings.savingsTargetMode === "flexible" ? 0 : goalData.plan.target;
+  return {
+    month,
+    previousMonthHasData: txRows.some((r) => r.status === "posted" && r.date >= previous.start && r.date <= previous.end),
+    pendingRecurring: { count: pendingRows.length, total: sumOf(pendingRows.map((r) => r.amount)) },
+    staleCount: staleOf(wealth.valuation).count,
+    goals: activeGoals(goalData).map((v) => ({ id: v.goal.id, name: v.goal.name, planned: v.planned, actual: v.actual })),
+    budgets: ctx.budgets.map((b) => ({ id: b.id, name: b.categoryId ? b.name : "overall", status: b.status })),
+    lastMonthSavings:
+      last && target > 0
+        ? { saved: periodSummary(filterByDateRange(txRows.map(toLedgerTx), last.start, last.end)).savings, target }
+        : null,
+  };
+}
+
+export type ScenarioDefaults = {
+  input: ScenarioInput;
+  /** Where income and spending came from: the trailing 3-month average or the figures entered in settings. */
+  basis: "average" | "entered";
+  /** Neither history nor entered figures: income and spending are 0. */
+  inputsMissing: boolean;
+  /** Classes with no assumed return anywhere (counted as 0%). */
+  returnsMissing: MixClass[];
+  /** Some investment values are out of date. */
+  stale: boolean;
+};
+
+type GoalSource = GoalData["goals"][number]["allocations"][number];
+
+const goalClass = (a: GoalSource): MixClass =>
+  a.kind === "cash" ? "cash" : a.holdingKind === "gold" ? "gold" : a.holdingKind === "cloud" ? "clouds" : "stocks";
+
+/**
+ * The calculator's starting figures, all from the user's own data: income and spending as the plan uses them, monthly
+ * investing as the average net purchases of the last full months (2 needed), returns from the assumptions (a cloud with
+ * no assumption uses the value-weighted APY of the clouds held), and today's value of each class. The invested part is
+ * split by today's mix of stocks, gold and clouds: the allocation rules aim at goals, not asset classes.
+ */
+export async function loadScenarioDefaults(
+  userId: string,
+  ctx: Pick<PlanningContext, "goalData" | "accounts" | "txRows" | "wealth">,
+): Promise<ScenarioDefaults> {
+  const { goalData } = ctx;
+  const { today, startDay } = goalData;
+  const [accountRows, txRows, wealth] = await Promise.all([
+    ctx.accounts ?? listAccounts(userId, { includeArchived: true }),
+    ctx.txRows ?? listTransactions(userId),
+    ctx.wealth ?? loadWealth(userId, today),
+  ]);
+
+  const ledger = txRows.map(toLedgerTx);
+  const invested = trailingAverage(
+    fullMonths(firstPosted(txRows), today, startDay, 3).map((r) => periodSummary(filterByDateRange(ledger, r.start, r.end)).netInvested),
+  );
+  const { values, cardDebt } = classValues(wealth, accountRows, accountBalances(accountRows, txRows));
+
+  const { assumptions } = goalData;
+  const withApy = wealth.valuation.clouds.filter((c) => c.apy !== null);
+  const cloudValue = sumOf(withApy.map((c) => c.value));
+  const cloudApy = assumptions.savingsCloudApy ?? (cloudValue > 0 ? sumOf(withApy.map((c) => c.value * c.apy!)) / cloudValue : null);
+  const assumed: Record<MixClass, number | null> = {
+    stocks: assumptions.stockReturn,
+    gold: assumptions.goldReturn,
+    clouds: cloudApy,
+    cash: assumptions.cashReturn,
+  };
+
+  const input: ScenarioInput = {
+    today,
+    startDay,
+    monthlyIncome: goalData.plan.income,
+    incomeGrowth: assumptions.incomeGrowth ?? 0,
+    monthlySpending: goalData.plan.spending,
+    monthlySavings: null,
+    monthlyInvestment: invested.kind === "average" ? Math.max(0, invested.value) : 0,
+    returns: { stocks: assumed.stocks ?? 0, gold: assumed.gold ?? 0, clouds: assumed.clouds ?? 0, cash: assumed.cash ?? 0 },
+    startValues: values,
+    investSplit: null,
+    liabilities: wealth.liabilitiesTotal + cardDebt,
+    years: 10,
+    inflation: assumptions.inflation,
+    goals: activeGoals(goalData).map((v) => ({
+      id: v.goal.id,
+      name: v.goal.name,
+      target: v.goal.targetAmount,
+      targetDate: v.goal.targetDate,
+      current: v.current,
+      plannedMonthly: v.planned,
+      sources: v.allocations.map((a) => ({ class: goalClass(a), value: a.kind === "cash" ? a.amount : a.value })),
+      returnOverride: v.goal.expectedReturnOverride,
+      contributedThisMonth: v.actual > 0,
+    })),
+  };
+  return {
+    input,
+    basis: goalData.plan.basis,
+    inputsMissing: goalData.plan.inputsMissing,
+    returnsMissing: MIX_CLASSES.filter((c) => assumed[c] === null),
+    stale: wealth.valuation.stale,
   };
 }

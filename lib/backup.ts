@@ -1,19 +1,21 @@
 import type { RuleKind, SavingsTargetMode, TargetKind } from "./finance-core/allocation";
+import { DEFAULT_NOTABLE_AMOUNT, DEFAULT_NOTABLE_PERCENT } from "./finance-core/analytics";
 import { type CashFlow, type Confirmation, DEFAULT_STALE_DAYS_CLOUDS, type RateChange, validateCloudHistory } from "./finance-core/clouds";
 import { DEFAULT_STALE_DAYS_GOLD, type GoldPriceMode, KARATS } from "./finance-core/gold";
 import { DEFAULT_BUDGET_ALERT_AT, DEFAULT_BUDGET_WARN_AT } from "./finance-core/budget";
 import { lineValue } from "./finance-core/holdings";
 import type { TxType } from "./finance-core/ledger";
-import { outstanding, validatePayment } from "./finance-core/liabilities";
+import { validateLiabilityHistory } from "./finance-core/liabilities";
 import type { Piasters } from "./finance-core/money";
 import { DEFAULT_STALE_DAYS, type HoldingEvent, purchaseCash, saleCash, validateHistory } from "./finance-core/portfolio";
+import { validateTargets } from "./finance-core/portfolioMix";
 
 // Pure: no React, Next.js or database imports. The enum lists below mirror db/schema.ts (backup.test.ts checks they match).
 
-export const BACKUP_VERSION = 5;
+export const BACKUP_VERSION = 6;
 // Version 1 files (no goals, rules or savings settings), version 2 files (no holdings), version 3 files
-// (no gold, clouds, liabilities or holding shares) and version 4 files (no budgets, recurring items or expense-based goal
-// targets) still restore.
+// (no gold, clouds, liabilities or holding shares), version 4 files (no budgets, recurring items or expense-based goal
+// targets) and version 5 files (no portfolio targets, insight thresholds, reminder switches or income growth) still restore.
 const OLDEST_VERSION = 1;
 
 export const ACCOUNT_TYPES = ["bank", "cash", "wallet", "brokerage", "savings", "credit_card", "receivable", "other"] as const;
@@ -232,6 +234,8 @@ export type BackupAssumptions = {
   savingsCloudApy: number | null;
   cashReturn: number | null;
   inflation: number | null;
+  /** Yearly growth of income for the scenario calculator. */
+  incomeGrowth: number | null;
 };
 
 export type BackupSettings = {
@@ -249,6 +253,20 @@ export type BackupSettings = {
   /** Decimals: 0.8 = a budget warns at 80% spent, alerts at 1 = 100%. */
   budgetWarnAt: number;
   budgetAlertAt: number;
+  /** Target share of each asset class, decimals: all four null (none set) or all four set, totalling 1. */
+  targetStocks: number | null;
+  targetGold: number | null;
+  targetClouds: number | null;
+  targetCash: number | null;
+  /** A spending change is an insight only if it reaches both: this share (0.15 = 15%) and this amount in piasters. */
+  insightMinPercent: number;
+  insightMinAmount: Piasters;
+  remindReview: boolean;
+  remindRecurring: boolean;
+  remindStale: boolean;
+  remindGoal: boolean;
+  remindBudget: boolean;
+  remindSavings: boolean;
 };
 
 export type BackupGoal = {
@@ -349,7 +367,10 @@ type Rated<T, K extends keyof T> = Omit<T, K> & { [P in K]: number | string | nu
 type AccountRow = Dated<BackupAccount, "archivedAt" | "createdAt" | "updatedAt">;
 type CategoryRow = Dated<BackupCategory, "archivedAt" | "createdAt">;
 type TransactionRow = Dated<BackupTransaction, "voidedAt" | "createdAt">;
-type SettingsRow = Rated<BackupSettings, "savingsTargetPercent" | "budgetWarnAt" | "budgetAlertAt">;
+type SettingsRow = Rated<
+  BackupSettings,
+  "savingsTargetPercent" | "budgetWarnAt" | "budgetAlertAt" | "targetStocks" | "targetGold" | "targetClouds" | "targetCash" | "insightMinPercent"
+>;
 type GoalRow = Rated<Dated<BackupGoal, "archivedAt" | "createdAt" | "updatedAt">, "expectedReturnOverride">;
 type GoalAllocationRow = Rated<Dated<BackupGoalAllocation, "createdAt" | "updatedAt">, "percent">;
 type GoalAllocationEventRow = Rated<Dated<BackupGoalAllocationEvent, "createdAt">, "percentDelta">;
@@ -414,6 +435,18 @@ export function serializeBackup(rows: BackupRows, exportedAt: Date = new Date())
       staleDaysClouds: rows.settings.staleDaysClouds,
       budgetWarnAt: Number(rows.settings.budgetWarnAt),
       budgetAlertAt: Number(rows.settings.budgetAlertAt),
+      targetStocks: numOrNull(rows.settings.targetStocks),
+      targetGold: numOrNull(rows.settings.targetGold),
+      targetClouds: numOrNull(rows.settings.targetClouds),
+      targetCash: numOrNull(rows.settings.targetCash),
+      insightMinPercent: Number(rows.settings.insightMinPercent),
+      insightMinAmount: rows.settings.insightMinAmount,
+      remindReview: rows.settings.remindReview,
+      remindRecurring: rows.settings.remindRecurring,
+      remindStale: rows.settings.remindStale,
+      remindGoal: rows.settings.remindGoal,
+      remindBudget: rows.settings.remindBudget,
+      remindSavings: rows.settings.remindSavings,
     },
     accounts: rows.accounts.map((a) => ({
       id: a.id,
@@ -619,6 +652,7 @@ export function serializeBackup(rows: BackupRows, exportedAt: Date = new Date())
       savingsCloudApy: numOrNull(rows.assumptions.savingsCloudApy),
       cashReturn: numOrNull(rows.assumptions.cashReturn),
       inflation: numOrNull(rows.assumptions.inflation),
+      incomeGrowth: numOrNull(rows.assumptions.incomeGrowth),
     },
   };
 }
@@ -789,7 +823,15 @@ function thousandths(o: Obj, k: string, w: string): number {
   return v;
 }
 
+/** A decimal with at most `places` decimals, so it fits its numeric column exactly. */
+function decimals(o: Obj, k: string, w: string, places: number): number {
+  const v = rate(o, k, w);
+  if (Math.abs(v * 10 ** places - Math.round(v * 10 ** places)) > 1e-6) bad(`${w}.${k}`, `must have at most ${places} decimals`);
+  return v;
+}
+
 const textOrNull = orNull(text);
+const targetOrNull = orNull((o: Obj, k: string, w: string) => decimals(o, k, w, 5));
 const decimalOrNull = orNull(decimal);
 const wholeOrNull = orNull((o: Obj, k: string, w: string) => whole(o, k, w));
 const rateOrNull = orNull(rate);
@@ -910,6 +952,49 @@ function staleDaysField(o: Obj, k: string): number {
   return days;
 }
 
+const V6_SETTINGS_DEFAULTS = {
+  targetStocks: null,
+  targetGold: null,
+  targetClouds: null,
+  targetCash: null,
+  insightMinPercent: DEFAULT_NOTABLE_PERCENT,
+  insightMinAmount: DEFAULT_NOTABLE_AMOUNT,
+  remindReview: true,
+  remindRecurring: true,
+  remindStale: true,
+  remindGoal: true,
+  remindBudget: true,
+  remindSavings: true,
+} as const;
+
+// Same rules as user_settings_target_mix_check and user_settings_insight_thresholds_check in db/schema.ts.
+function parseV6Settings(o: Obj): Pick<BackupSettings, keyof typeof V6_SETTINGS_DEFAULTS> {
+  const targets = {
+    targetStocks: targetOrNull(o, "targetStocks", "settings"),
+    targetGold: targetOrNull(o, "targetGold", "settings"),
+    targetClouds: targetOrNull(o, "targetClouds", "settings"),
+    targetCash: targetOrNull(o, "targetCash", "settings"),
+  };
+  const check = validateTargets({ stocks: targets.targetStocks, gold: targets.targetGold, clouds: targets.targetClouds, cash: targets.targetCash });
+  if (!check.ok) bad("settings", check.error);
+  const insightMinPercent = decimals(o, "insightMinPercent", "settings", 4);
+  const insightMinAmount = whole(o, "insightMinAmount", "settings");
+  if (insightMinPercent < 0 || insightMinPercent >= 10 || insightMinAmount < 0) {
+    bad("settings", "insightMinPercent must be between 0 and 10 (1000%) and insightMinAmount must not be negative");
+  }
+  return {
+    ...targets,
+    insightMinPercent,
+    insightMinAmount,
+    remindReview: flag(o, "remindReview", "settings"),
+    remindRecurring: flag(o, "remindRecurring", "settings"),
+    remindStale: flag(o, "remindStale", "settings"),
+    remindGoal: flag(o, "remindGoal", "settings"),
+    remindBudget: flag(o, "remindBudget", "settings"),
+    remindSavings: flag(o, "remindSavings", "settings"),
+  };
+}
+
 function parseSettings(raw: unknown, version: number): BackupSettings {
   const o = entry(raw, "settings");
   const monthStartDay = whole(o, "monthStartDay", "settings", "a whole number from 1 to 28");
@@ -928,6 +1013,7 @@ function parseSettings(raw: unknown, version: number): BackupSettings {
       staleDaysClouds: DEFAULT_STALE_DAYS_CLOUDS,
       budgetWarnAt: DEFAULT_BUDGET_WARN_AT,
       budgetAlertAt: DEFAULT_BUDGET_ALERT_AT,
+      ...V6_SETTINGS_DEFAULTS,
     };
   }
   // Same rule as user_settings_stale_days_holdings_range in db/schema.ts.
@@ -951,11 +1037,12 @@ function parseSettings(raw: unknown, version: number): BackupSettings {
     staleDaysClouds: version < 4 ? DEFAULT_STALE_DAYS_CLOUDS : staleDaysField(o, "staleDaysClouds"),
     budgetWarnAt,
     budgetAlertAt,
+    ...(version < 6 ? V6_SETTINGS_DEFAULTS : parseV6Settings(o)),
   };
 }
 
 function parseAssumptions(raw: unknown, version: number): BackupAssumptions {
-  if (version < 3) return { stockReturn: null, goldReturn: null, savingsCloudApy: null, cashReturn: null, inflation: null };
+  if (version < 3) return { stockReturn: null, goldReturn: null, savingsCloudApy: null, cashReturn: null, inflation: null, incomeGrowth: null };
   const o = entry(raw, "assumptions");
   return {
     stockReturn: rateOrNull(o, "stockReturn", "assumptions"),
@@ -963,6 +1050,7 @@ function parseAssumptions(raw: unknown, version: number): BackupAssumptions {
     savingsCloudApy: rateOrNull(o, "savingsCloudApy", "assumptions"),
     cashReturn: rateOrNull(o, "cashReturn", "assumptions"),
     inflation: rateOrNull(o, "inflation", "assumptions"),
+    incomeGrowth: version < 6 ? null : rateOrNull(o, "incomeGrowth", "assumptions"),
   };
 }
 
@@ -1535,22 +1623,17 @@ function build(input: unknown): Backup {
     }
   });
 
-  // A principal payment never exceeds what is outstanding. Dates do not matter here, matching recordPayment: the
-  // payments together stay within the opening balance plus every manual update.
+  // Same rule as recordPayment and addLiabilityUpdate: replayed in date order, the balance (opening + manual updates -
+  // posted principal payments) is never below zero at the end of any date. No amounts in the message.
   liabilities.forEach((l, i) => {
-    const updates = liabilityUpdates.filter((u) => u.liabilityId === l.id);
-    // Same rule as addLiabilityUpdate: the opening balance plus every manual update stays at or above zero. Dates are
-    // not checked, so a history the app accepted always restores. No amounts in the message.
-    if (updates.reduce((total, u) => total + u.delta, l.openingBalance) < 0) {
-      bad(`liabilities[${i}]`, "the manual updates take the balance below zero");
-    }
-    const paid: { date: string; amount: Piasters }[] = [];
-    for (const t of transactions) {
-      if (t.type !== "LIABILITY_PAYMENT" || t.status !== "posted" || t.liabilityId !== l.id) continue;
-      const open = outstanding(l.openingBalance, updates, paid);
-      if (!validatePayment(t.amount, 0, open).ok) bad(`liabilities[${i}]`, `a principal payment is larger than the balance outstanding (on ${t.date})`);
-      paid.push({ date: t.date, amount: t.amount });
-    }
+    const check = validateLiabilityHistory(
+      l.openingBalance,
+      liabilityUpdates.filter((u) => u.liabilityId === l.id),
+      transactions
+        .filter((t) => t.type === "LIABILITY_PAYMENT" && t.status === "posted" && t.liabilityId === l.id)
+        .map((t) => ({ date: t.date, amount: t.amount })),
+    );
+    if (!check.ok) bad(`liabilities[${i}]`, `the balance goes below zero on ${check.date}`);
   });
 
   // The shares of one holding across all goals add up to at most 100%, counted in whole millionths.

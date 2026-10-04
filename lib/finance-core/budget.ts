@@ -16,7 +16,8 @@ export type BudgetStatus = {
   /** Decimal: 0.8 = 80%. */
   percentUsed: number;
   projected: Piasters;
-  level: "ok" | "warn" | "over";
+  /** "alert" = past the configured alert level; "over" only when spent is actually above the budget. */
+  level: "ok" | "warn" | "alert" | "over";
   /** The projected month-end spending exceeds the budget (whether or not spending has already). */
   projectedOver: boolean;
 };
@@ -58,7 +59,7 @@ export function budgetStatus(input: {
     remaining: budget - spent,
     percentUsed,
     projected,
-    level: percentUsed >= alertAt ? "over" : percentUsed >= warnAt ? "warn" : "ok",
+    level: spent > budget ? "over" : percentUsed >= alertAt ? "alert" : percentUsed >= warnAt ? "warn" : "ok",
     projectedOver: projected > budget,
   };
 }

@@ -97,6 +97,18 @@ const rows = {
     staleDaysClouds: 45,
     budgetWarnAt: "0.750" as string | number, // numeric columns arrive as text
     budgetAlertAt: "1.000" as string | number,
+    targetStocks: "0.40000" as string | null, // numeric columns arrive as text
+    targetGold: "0.10000" as string | null,
+    targetClouds: "0.20000" as string | null,
+    targetCash: "0.30000" as string | null,
+    insightMinPercent: "0.2000" as string | number,
+    insightMinAmount: 75_000,
+    remindReview: true,
+    remindRecurring: false,
+    remindStale: true,
+    remindGoal: true,
+    remindBudget: false,
+    remindSavings: true,
   },
   accounts: [
     { ...base, id: BANK, name: "CIB", type: "bank" as const, institution: "CIB", notes: null, isInvestment: false, openingBalance: 5_000_000, archivedAt: null, updatedAt: at("2026-03-02T08:00:00.000Z") },
@@ -180,7 +192,7 @@ const rows = {
     { ...base, id: id(91), holdingId: COMI, kind: "BONUS" as "BONUS" | "SPLIT" | "WRITE_OFF", date: "2026-03-10", quantity: "10.000000" as string | null, ratio: null as string | null, note: "1 for 10 bonus" as string | null },
     { ...base, id: id(92), holdingId: GOLD_FUND, kind: "SPLIT" as const, date: "2026-03-15", quantity: null, ratio: "2.000000", note: null },
   ],
-  assumptions: { stockReturn: "0.150000" as string | null, goldReturn: null as string | null, savingsCloudApy: "0.120000" as string | null, cashReturn: null as string | null, inflation: "0.250000" as string | null },
+  assumptions: { stockReturn: "0.150000" as string | null, goldReturn: null as string | null, savingsCloudApy: "0.120000" as string | null, cashReturn: null as string | null, inflation: "0.250000" as string | null, incomeGrowth: "0.050000" as string | null },
   goals: [
     { ...base, id: EMERGENCY, name: "Emergency fund", targetAmount: 10_000_000, targetMode: "expense_months" as "manual" | "expense_months", targetMonths: 6 as number | null, targetDate: "2027-12-31", startDate: "2026-03-01", priority: 1, plannedMonthly: 500_000 as number | null, expectedReturnOverride: "0.120000" as string | null, manualCurrent: null as number | null, notes: "six months", color: "#22aa77", icon: "shield", archivedAt: null as Date | null, updatedAt: at("2026-03-05T08:00:00.000Z") },
     { ...base, id: TRIP, name: "Trip", targetAmount: 2_000_000, targetMode: "manual" as const, targetMonths: null, targetDate: "2026-12-01", startDate: "2026-03-01", priority: 2, plannedMonthly: null, expectedReturnOverride: null, manualCurrent: 150_000, notes: null, color: null, icon: null, archivedAt: at("2026-06-01T00:00:00.000Z"), updatedAt: base.createdAt },
@@ -315,6 +327,18 @@ describe("backup format", () => {
       staleDaysClouds: 45,
       budgetWarnAt: 0.75,
       budgetAlertAt: 1,
+      targetStocks: 0.4,
+      targetGold: 0.1,
+      targetClouds: 0.2,
+      targetCash: 0.3,
+      insightMinPercent: 0.2,
+      insightMinAmount: 75_000,
+      remindReview: true,
+      remindRecurring: false,
+      remindStale: true,
+      remindGoal: true,
+      remindBudget: false,
+      remindSavings: true,
     });
     expect(backup.goals.map((g) => g.expectedReturnOverride)).toEqual([0.12, null]);
     expect(backup.allocationRules.map((r) => r.percent)).toEqual([null, 0.25, null]);
@@ -342,7 +366,7 @@ describe("round trip of holdings", () => {
       ["BONUS", "10.000000", null],
       ["SPLIT", null, "2.000000"],
     ]);
-    expect(backup.assumptions).toEqual({ stockReturn: 0.15, goldReturn: null, savingsCloudApy: 0.12, cashReturn: null, inflation: 0.25 });
+    expect(backup.assumptions).toEqual({ stockReturn: 0.15, goldReturn: null, savingsCloudApy: 0.12, cashReturn: null, inflation: 0.25, incomeGrowth: 0.05 });
     expect(parseBackup(JSON.parse(JSON.stringify(backup)))).toEqual({ ok: true, backup });
   });
 
@@ -453,7 +477,18 @@ describe("round trip of gold, clouds, loans and holding shares (version 4)", () 
 // What the older app versions wrote: v1 has no goals, rules or savings settings; v2 adds them but has no holdings.
 // v3 files have no gold, clouds, liabilities or holding shares: drop them and the columns they added.
 // v4 files have no budgets, recurring templates, expense-based goal targets or budget thresholds.
+// v5 files have no portfolio targets, insight thresholds, reminder switches or income growth.
+const V6_SETTINGS = [
+  "targetStocks", "targetGold", "targetClouds", "targetCash", "insightMinPercent", "insightMinAmount",
+  "remindReview", "remindRecurring", "remindStale", "remindGoal", "remindBudget", "remindSavings",
+];
+const stripV6 = (b: any) => { // eslint-disable-line @typescript-eslint/no-explicit-any
+  for (const key of V6_SETTINGS) delete b.settings[key];
+  delete b.assumptions.incomeGrowth;
+};
+
 const stripV5 = (b: any) => { // eslint-disable-line @typescript-eslint/no-explicit-any
+  stripV6(b);
   for (const key of ["budgets", "recurringTemplates"]) delete b[key];
   for (const key of ["budgetWarnAt", "budgetAlertAt"]) delete b.settings[key];
   for (const g of b.goals) for (const key of ["targetMode", "targetMonths"]) delete g[key];
@@ -543,7 +578,7 @@ describe("version 2 files", () => {
     const b = parsed.backup;
     expect(b.version).toBe(BACKUP_VERSION);
     expect([b.holdings, b.priceUpdates, b.corporateActions]).toEqual([[], [], []]);
-    expect(b.assumptions).toEqual({ stockReturn: null, goldReturn: null, savingsCloudApy: null, cashReturn: null, inflation: null });
+    expect(b.assumptions).toEqual({ stockReturn: null, goldReturn: null, savingsCloudApy: null, cashReturn: null, inflation: null, incomeGrowth: null });
     expect(b.settings.staleDaysHoldings).toBe(7);
     expect(b.settings.savingsTargetMode).toBe("percentage");
     expect(b.goals).toHaveLength(2);
@@ -596,6 +631,18 @@ describe("version 1 files", () => {
       staleDaysClouds: 30,
       budgetWarnAt: 0.8,
       budgetAlertAt: 1,
+      targetStocks: null,
+      targetGold: null,
+      targetClouds: null,
+      targetCash: null,
+      insightMinPercent: 0.15,
+      insightMinAmount: 50_000,
+      remindReview: true,
+      remindRecurring: true,
+      remindStale: true,
+      remindGoal: true,
+      remindBudget: true,
+      remindSavings: true,
     });
     expect([b.budgets, b.recurringTemplates]).toEqual([[], []]);
     expect(b.accounts).toEqual(file.accounts);
@@ -633,7 +680,7 @@ describe("parseBackup rejects", () => {
       if (!result.ok) expect(result.error).toContain("JSON object");
     });
     rejects([
-      ["unknown version", (b) => (b.version = 6 as never), "version: 6 is not supported"],
+      ["unknown version", (b) => (b.version = 7 as never), "version: 7 is not supported"],
       ["fractional version", (b) => (b.version = 2.5 as never), "version: 2.5 is not supported"],
       ["version 0", (b) => (b.version = 0 as never), "version: 0 is not supported"],
       ["missing version", (b) => delete b.version, "version: undefined"],
@@ -1204,13 +1251,21 @@ describe("parseBackup rejects (version 4 additions)", () => {
       ["a liability id on a transfer", (b) => (transfer(b).liabilityId = LOAN), "only a LIABILITY_PAYMENT or an EXPENSE may belong to a liability, not TRANSFER"],
       ["a payment of an unknown liability", (b) => (principal(b).liabilityId = id(99)), "transactions[16].liabilityId: refers to a liability that is not in the file"],
       ["an interest expense of an unknown liability", (b) => (b.transactions[17].liabilityId = id(99)), "transactions[17].liabilityId: refers to a liability"],
-      ["a principal payment above the balance", (b) => (principal(b).amount = 2_000_000), "liabilities[0]: a principal payment is larger than the balance outstanding"],
+      ["a principal payment above the balance", (b) => (principal(b).amount = 2_000_000), "liabilities[0]: the balance goes below zero on 2026-03-18"],
       [
         "two payments that together exceed the balance",
         (b) => b.transactions.push({ ...principal(b), id: id(140), amount: 1_200_000 }),
-        "liabilities[0]: a principal payment is larger than the balance outstanding",
+        "liabilities[0]: the balance goes below zero on 2026-03-20",
       ],
-      ["a payment after a correction that removed the balance", (b) => (b.liabilityUpdates[1].delta = -1_300_000), "liabilities[0]: a principal payment is larger"],
+      ["a payment after a correction that removed the balance", (b) => (b.liabilityUpdates[1].delta = -1_300_000), "liabilities[0]: the balance goes below zero on 2026-03-20"],
+      [
+        "a payment dated before the borrowing that funds it",
+        (b) => {
+          b.liabilityUpdates[0].date = "2026-03-19";
+          principal(b).amount = 1_200_000;
+        },
+        "liabilities[0]: the balance goes below zero on 2026-03-18",
+      ],
     ]);
 
     it("accepts a payment of exactly the balance, and refuses one piaster more", () => {
@@ -1299,7 +1354,7 @@ const emergencyGoal = (b: Backup) => b.goals[0];
 describe("round trip of budgets, recurring templates and expense-based goals (version 5)", () => {
   it("keeps every new table and column, with thresholds as decimals", () => {
     const backup = serializeBackup(rows, EXPORTED_AT);
-    expect(backup.version).toBe(5);
+    expect(backup.version).toBe(BACKUP_VERSION);
     expect(backup.budgets.map((x) => [x.categoryId, x.amount])).toEqual([[null, 2_000_000], [FOOD, 500_000]]);
     expect(backup.recurringTemplates.map((t) => [t.name, t.type, t.frequency, t.endDate, t.autoPost, t.active])).toEqual([
       ["Retainer", "INCOME", "monthly", null, true, true],
@@ -1483,7 +1538,7 @@ describe("parseBackup rejects a liability whose balance goes below zero (opening
     b.liabilities[0].openingBalance + b.liabilityUpdates.filter((u) => u.liabilityId === LOAN).reduce((t, u) => t + u.delta, 0);
 
   rejects([
-    ["a correction larger than everything owed", (b) => (b.liabilityUpdates[1].delta = -1_600_000), "liabilities[0]: the manual updates take the balance below zero"],
+    ["a correction larger than everything owed", (b) => (b.liabilityUpdates[1].delta = -1_600_000), "liabilities[0]: the balance goes below zero on 2026-03-20"],
   ]);
 
   const paid = (b: Backup) =>
@@ -1491,12 +1546,14 @@ describe("parseBackup rejects a liability whose balance goes below zero (opening
       .filter((t) => t.type === "LIABILITY_PAYMENT" && t.status === "posted" && t.liabilityId === LOAN)
       .reduce((t, x) => t + x.amount, 0);
 
-  // The app checks the total, not the order of dates, so a file it produced must restore.
-  it("accepts a correction dated before the borrowing that covers it", () => {
+  // The app replays in date order (validateLiabilityHistory), so a file it produced always restores and one it would refuse does not.
+  it("refuses a correction dated before the borrowing that covers it, and accepts it once the borrowing is dated first", () => {
     const b = valid();
     const dip = b.liabilities[0].openingBalance + 1; // on its own date this takes the running balance below zero
     update(b, 133, "2026-01-01", -dip);
     update(b, 134, "2026-06-01", dip);
+    expect(parseBackup(b)).toMatchObject({ ok: false });
+    b.liabilityUpdates[b.liabilityUpdates.length - 1].date = "2025-12-31";
     expect(parseBackup(b).ok).toBe(true);
   });
 
@@ -1548,8 +1605,8 @@ describe("restore errors never quote quantities, grams or amounts", () => {
       "holdings[3]: cannot be valued",
     ],
     ["a cloud withdrawal above its value", (b) => (withdrawal(b).amount = 5_000_000), "holdings[3]: a withdrawal is larger than the cloud's estimated value (on 2026-03-20)"],
-    ["a loan payment above the balance", (b) => (principal(b).amount = 2_000_000), "liabilities[0]: a principal payment is larger than the balance outstanding (on 2026-03-18)"],
-    ["a loan correction below zero", (b) => (b.liabilityUpdates[1].delta = -1_600_000), "liabilities[0]: the manual updates take the balance below zero"],
+    ["a loan payment above the balance", (b) => (principal(b).amount = 2_000_000), "liabilities[0]: the balance goes below zero on 2026-03-18"],
+    ["a loan correction below zero", (b) => (b.liabilityUpdates[1].delta = -1_600_000), "liabilities[0]: the balance goes below zero on 2026-03-20"],
     ["a purchase paid a piaster more", (b) => (trade(b, 0).amount += 1), "transactions[7].amount: does not equal quantity x unitPrice plus fee"],
     ["a sale with the wrong gross", (b) => (trade(b, 1).grossAmount = 48_001), "transactions[8].grossAmount: does not equal quantity x unitPrice"],
   ])("%s", (_name, mutate, expected) => {
@@ -1637,5 +1694,130 @@ describe("transactionsToCsv", () => {
     ).split("\r\n");
     expect(line).toBe("2026-03-10,ADJUSTMENT,-0.05,,'=cmd|' /C calc'!A0,'@x,,posted");
     expect(csv([{ amount: 5 }])[1]).toContain(",0.05,");
+  });
+});
+
+describe("round trip of targets, insight thresholds, reminder switches and income growth (version 6)", () => {
+  it("keeps every new setting, with shares as numbers and the amount in piasters", () => {
+    const backup = serializeBackup(rows, EXPORTED_AT);
+    expect(backup.version).toBe(6);
+    expect(backup.settings).toMatchObject({
+      targetStocks: 0.4,
+      targetGold: 0.1,
+      targetClouds: 0.2,
+      targetCash: 0.3,
+      insightMinPercent: 0.2,
+      insightMinAmount: 75_000,
+      remindReview: true,
+      remindRecurring: false,
+      remindBudget: false,
+    });
+    expect(backup.assumptions.incomeGrowth).toBe(0.05);
+    expect(parseBackup(JSON.parse(JSON.stringify(backup)))).toEqual({ ok: true, backup });
+  });
+
+  it("round trips with no targets set and a blank income growth", () => {
+    const none = { ...rows.settings, targetStocks: null, targetGold: null, targetClouds: null, targetCash: null };
+    const backup = serializeBackup({ ...rows, settings: none, assumptions: { ...rows.assumptions, incomeGrowth: null } }, EXPORTED_AT);
+    expect(backup.settings.targetStocks).toBeNull();
+    expect(parseBackup(JSON.parse(JSON.stringify(backup)))).toEqual({ ok: true, backup });
+  });
+});
+
+describe("version 5 files", () => {
+  const v5 = () => {
+    const b: any = valid(); // eslint-disable-line @typescript-eslint/no-explicit-any
+    stripV6(b);
+    b.version = 5;
+    return b;
+  };
+
+  it("still restore, with no targets, the default thresholds, every reminder on and no income growth", () => {
+    const file = v5();
+    const parsed = parseBackup(file);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const b = parsed.backup;
+    expect(b.version).toBe(BACKUP_VERSION);
+    expect([b.settings.targetStocks, b.settings.targetGold, b.settings.targetClouds, b.settings.targetCash]).toEqual([null, null, null, null]);
+    expect([b.settings.insightMinPercent, b.settings.insightMinAmount]).toEqual([0.15, 50_000]);
+    expect([b.settings.remindReview, b.settings.remindRecurring, b.settings.remindStale, b.settings.remindGoal, b.settings.remindBudget, b.settings.remindSavings]).toEqual(Array(6).fill(true));
+    expect(b.assumptions.incomeGrowth).toBeNull();
+    expect([b.settings.budgetWarnAt, b.settings.budgetAlertAt]).toEqual([0.75, 1]);
+    expect(b.budgets).toHaveLength(2);
+    expect(balances(b)).toEqual(balances(file));
+  });
+
+  it("ignore new-format fields they should not have", () => {
+    const file = v5();
+    Object.assign(file.settings, { targetStocks: 0.9, insightMinPercent: 5, remindReview: false });
+    file.assumptions.incomeGrowth = 0.5;
+    const parsed = parseBackup(file);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect([parsed.backup.settings.targetStocks, parsed.backup.settings.insightMinPercent, parsed.backup.settings.remindReview, parsed.backup.assumptions.incomeGrowth]).toEqual([null, 0.15, true, null]);
+    }
+  });
+
+  it("are still validated like before", () => {
+    const file = v5();
+    file.liabilities[0].openingBalance = 0;
+    expect(parseBackup(file)).toMatchObject({ ok: false });
+  });
+});
+
+describe("parseBackup rejects (version 6 additions)", () => {
+  describe("portfolio targets (user_settings_target_mix_check)", () => {
+    rejects([
+      ["some targets set and some not", (b) => (b.settings.targetCash = null), "settings: Set a target for all four classes, or clear them all."],
+      ["targets that total 99%", (b) => (b.settings.targetCash = 0.29), "settings: Your targets must add up to 100%."],
+      ["targets that total 101%", (b) => (b.settings.targetCash = 0.31), "settings: Your targets must add up to 100%."],
+      ["a target above 100%", (b) => Object.assign(b.settings, { targetStocks: 1.2, targetGold: -0.1, targetClouds: 0, targetCash: -0.1 }), "settings: Each target must be between 0% and 100%."],
+      ["a negative target", (b) => Object.assign(b.settings, { targetStocks: 0.5, targetGold: -0.1, targetClouds: 0.3, targetCash: 0.3 }), "settings: Each target must be between 0% and 100%."],
+      ["a target with 6 decimals", (b) => (b.settings.targetStocks = 0.400001), "settings.targetStocks: must have at most 5 decimals"],
+      ["a target that is not a number", (b) => (b.settings.targetGold = "10%" as never), "settings.targetGold: must be a decimal rate"],
+      ["a target left out", (b) => delete (b.settings as Partial<typeof b.settings>).targetGold, "settings.targetGold"],
+    ]);
+
+    it("accepts all four blank, a 100% single class and shares with 5 decimals that total 100%", () => {
+      const b = valid();
+      Object.assign(b.settings, { targetStocks: null, targetGold: null, targetClouds: null, targetCash: null });
+      expect(parseBackup(b).ok).toBe(true);
+      Object.assign(b.settings, { targetStocks: 1, targetGold: 0, targetClouds: 0, targetCash: 0 });
+      expect(parseBackup(b).ok).toBe(true);
+      Object.assign(b.settings, { targetStocks: 0.33333, targetGold: 0.33333, targetClouds: 0.33334, targetCash: 0 });
+      expect(parseBackup(b).ok).toBe(true);
+    });
+  });
+
+  describe("insight thresholds (user_settings_insight_thresholds_check) and reminder switches", () => {
+    rejects([
+      ["a negative percent", (b) => (b.settings.insightMinPercent = -0.01), "settings: insightMinPercent must be between 0 and 10"],
+      ["a percent beyond the column", (b) => (b.settings.insightMinPercent = 10), "settings: insightMinPercent must be between 0 and 10"],
+      ["a percent with 5 decimals", (b) => (b.settings.insightMinPercent = 0.15001), "settings.insightMinPercent: must have at most 4 decimals"],
+      ["a negative amount", (b) => (b.settings.insightMinAmount = -1), "settings: insightMinPercent must be between 0 and 10"],
+      ["a fractional amount", (b) => (b.settings.insightMinAmount = 500.5), "settings.insightMinAmount: must be a whole number of piasters"],
+      ["a switch that is not a boolean", (b) => (b.settings.remindGoal = "yes" as never), "settings.remindGoal"],
+      ["a missing switch", (b) => delete (b.settings as Partial<typeof b.settings>).remindSavings, "settings.remindSavings"],
+      ["a missing percent", (b) => delete (b.settings as Partial<typeof b.settings>).insightMinPercent, "settings.insightMinPercent"],
+    ]);
+
+    it("accepts a percent and an amount of zero", () => {
+      const b = valid();
+      Object.assign(b.settings, { insightMinPercent: 0, insightMinAmount: 0 });
+      expect(parseBackup(b).ok).toBe(true);
+    });
+  });
+
+  describe("income growth", () => {
+    rejects([["income growth that is not a number", (b) => (b.assumptions.incomeGrowth = "5%" as never), "assumptions.incomeGrowth"]]);
+
+    it("accepts a blank, and a negative growth", () => {
+      const b = valid();
+      b.assumptions.incomeGrowth = null;
+      expect(parseBackup(b).ok).toBe(true);
+      b.assumptions.incomeGrowth = -0.1;
+      expect(parseBackup(b).ok).toBe(true);
+    });
   });
 });

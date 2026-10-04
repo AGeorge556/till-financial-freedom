@@ -56,6 +56,8 @@ function chunks<T>(rows: T[]): T[][] {
 const when = (s: string | null) => (s === null ? null : new Date(s));
 // numeric(8,6) columns take text; toFixed(6) is exact for any rate with at most 6 decimals.
 const rateText = (n: number | null) => (n === null ? null : n.toFixed(6));
+// numeric(6,5) target shares: the parser already refused anything with more than 5 decimals.
+const targetText = (n: number | null) => (n === null ? null : n.toFixed(5));
 
 /** Restores a backup file into an empty account, all or nothing. Never merges and never overwrites. */
 export async function importBackup(_prev: ImportState, formData: FormData): Promise<ImportState> {
@@ -85,6 +87,12 @@ export async function importBackup(_prev: ImportState, formData: FormData): Prom
         // numeric(4,3): the parser already refused anything with more than 3 decimals.
         budgetWarnAt: b.settings.budgetWarnAt.toFixed(3),
         budgetAlertAt: b.settings.budgetAlertAt.toFixed(3),
+        targetStocks: targetText(b.settings.targetStocks),
+        targetGold: targetText(b.settings.targetGold),
+        targetClouds: targetText(b.settings.targetClouds),
+        targetCash: targetText(b.settings.targetCash),
+        // numeric(5,4): at most 4 decimals, checked by the parser.
+        insightMinPercent: b.settings.insightMinPercent.toFixed(4),
       };
       await tx
         .insert(userSettings)

@@ -6,7 +6,7 @@ import { db } from "@/db";
 import { listLiabilityTransactions, listLiabilityUpdates, outstandingOf } from "@/db/queries";
 import { accounts, categories, liabilities, liabilityKind, liabilityUpdates, transactions } from "@/db/schema";
 import { requireUserId } from "@/lib/auth";
-import { validatePayment } from "@/lib/finance-core/liabilities";
+import { validateLiabilityHistory } from "@/lib/finance-core/liabilities";
 import { parseEGP, type Piasters } from "@/lib/finance-core/money";
 import { cairoToday } from "@/lib/finance-core/time";
 import { type ActionState, id, isRealDate, NAME_ERROR, str, validName } from "./shared";
@@ -112,6 +112,26 @@ async function balance(tx: Tx, userId: string, liability: Liability): Promise<Pi
   return outstandingOf(liability, updates, txs);
 }
 
+/**
+ * Refuses a history in which the balance would be below zero at the end of any date (the engine replays them in date
+ * order), so a payment dated before the borrowing that funds it, and a correction that undoes one, are caught.
+ */
+async function checkHistory(
+  tx: Tx,
+  userId: string,
+  liability: Liability,
+  proposed: { update?: { date: string; delta: Piasters }; payment?: { date: string; amount: Piasters } },
+): Promise<void> {
+  const updates = (await listLiabilityUpdates(userId, liability.id, tx)).map((u) => ({ date: u.date, delta: u.delta }));
+  const payments = (await listLiabilityTransactions(userId, liability.id, tx))
+    .filter((t) => t.type === "LIABILITY_PAYMENT" && t.status === "posted")
+    .map((t) => ({ date: t.date, amount: t.amount }));
+  if (proposed.update) updates.push(proposed.update);
+  if (proposed.payment) payments.push(proposed.payment);
+  const check = validateLiabilityHistory(liability.openingBalance, updates, payments);
+  if (!check.ok) refuse(check.message);
+}
+
 export async function createLiability(_prev: ActionState, formData: FormData): Promise<ActionState> {
   const userId = await requireUserId();
   const fields = parseFields(formData);
@@ -211,10 +231,7 @@ export async function recordPayment(_prev: ActionState, formData: FormData): Pro
         .where(and(eq(categories.id, categoryId!), eq(categories.userId, userId), eq(categories.kind, "expense")));
       if (!category) refuse("Category not found, or it is not an expense category.");
     }
-    const check = validatePayment(principal, interest, await balance(tx, userId, liability));
-    if (!check.ok) {
-      refuse(check.error === "exceeds-outstanding" ? "That principal is more than the balance outstanding." : MONEY_ERROR);
-    }
+    await checkHistory(tx, userId, liability, { payment: { date, amount: principal } });
 
     const createdAt = new Date();
     const common = { userId, date, fromAccountId: account!.id, liabilityId: liability.id, note: note || null, createdAt };
@@ -237,7 +254,7 @@ export async function addLiabilityUpdate(_prev: ActionState, formData: FormData)
   const delta = direction === "more" ? amount : -amount;
 
   return mutate(userId, id(formData, "liabilityId"), async (tx, liability) => {
-    if (delta < 0 && (await balance(tx, userId, liability)) + delta < 0) refuse("That correction is more than the balance outstanding.");
+    if (delta < 0) await checkHistory(tx, userId, liability, { update: { date, delta } });
     await tx
       .insert(liabilityUpdates)
       .values({ userId, liabilityId: liability.id, date, delta, note: note || null, createdAt: new Date() });

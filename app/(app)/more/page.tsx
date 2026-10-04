@@ -6,12 +6,16 @@ export const metadata: Metadata = { title: "More" };
 
 const links = [
   { href: "/more/review", title: "Monthly review", hint: "How the month went: saved, invested, net worth change" },
+  { href: "/more/history", title: "Net worth history", hint: "Net worth, cash, investments and debt over time" },
+  { href: "/more/scenarios", title: "What if", hint: "Try a different income, saving or return and see where it leads" },
+  { href: "/more/reports", title: "Reports", hint: "One place to find every report" },
   { href: "/more/budgets", title: "Budgets", hint: "What you plan to spend each month, and warning levels" },
   { href: "/more/recurring", title: "Recurring", hint: "Bills and income that repeat" },
   { href: "/more/accounts", title: "Accounts", hint: "Balances, add or archive an account" },
   { href: "/more/liabilities", title: "Loans", hint: "Loans and money you owe, payments" },
   { href: "/more/categories", title: "Categories", hint: "What you spend on and earn from" },
   { href: "/more/assumptions", title: "Assumptions", hint: "Expected returns, gold prices and when a value counts as old" },
+  { href: "/more/reminders", title: "Reminders and insights", hint: "Which reminders show on Home, and how small a change to hide" },
   { href: "/more/backup", title: "Backup", hint: "Save a copy of your data" },
 ];
 

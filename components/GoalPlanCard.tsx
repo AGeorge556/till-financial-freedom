@@ -16,9 +16,9 @@ export function GoalPlanCard({
 }) {
   const diff = actual - planned;
   return (
-    <section className={`mt-8 p-5 ${card}`}>
+    <section className={`p-5 ${card}`}>
       <div className="flex items-baseline justify-between gap-3">
-        <h2 className="text-lg font-semibold tracking-tight">This month&apos;s plan</h2>
+        <h2 className="text-lg font-semibold tracking-tight">Monthly plan</h2>
         <Link href="/goals/plan" className="inline-flex min-h-11 items-center text-sm underline">
           See the plan
         </Link>

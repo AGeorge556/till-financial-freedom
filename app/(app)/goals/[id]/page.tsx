@@ -9,6 +9,7 @@ import { KIND_LABEL } from "@/components/HoldingFormat";
 import { GoalWhatIf } from "@/components/GoalWhatIf";
 import { BackLink, card } from "@/components/ui";
 import { requireUserId } from "@/lib/auth";
+import { inflationAdjustedTarget } from "@/lib/finance-core/projection";
 import { loadGoalData } from "../data";
 
 export const metadata: Metadata = { title: "Goal" };
@@ -58,6 +59,7 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
     .filter((h) => !h.archived || h.current !== "0");
   const history = data.events.filter((e) => e.goalId === id).slice(0, 10);
 
+  const inflation = data.assumptions.inflation;
   const returnLine =
     view.rateSource === "override"
       ? `Projection assumes ${formatRate(view.rate)} a year (your override)`
@@ -96,6 +98,14 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
             `You have not set a return for ${view.returnsMissing.join(" and ")}, so ${view.returnsMissing.length > 1 ? "they count" : "it counts"} as 0%. `}
           Projections are assumptions, not guarantees.
         </p>
+        {inflation !== null && p.monthsRemaining > 0 && (
+          <p className="mt-3 border-t border-border pt-3 text-sm text-muted">
+            With {formatRate(inflation)} inflation a year, you would need about{" "}
+            <Amount value={inflationAdjustedTarget(goal.targetAmount, inflation, p.monthsRemaining / 12)} /> in{" "}
+            {goal.targetDate.slice(0, 4)} to buy what this target buys today. This is shown on its own; the figures above are not
+            adjusted.
+          </p>
+        )}
         {view.ruleShortfall > 0 && (
           <p role="status" className="mt-2 text-sm text-negative">
             Your allocation rules cannot fully fund this goal this month.

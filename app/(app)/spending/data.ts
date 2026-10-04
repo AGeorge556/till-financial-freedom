@@ -2,6 +2,7 @@ import "server-only";
 import type { ListRow } from "@/components/TransactionList";
 import {
   getBudgetThresholds,
+  getInsightThresholds,
   getSettings,
   listAccounts,
   listBudgets,
@@ -74,7 +75,7 @@ export type SpendingComparison =
   | { kind: "not-enough-history" }
   | { kind: "comparison"; current: Piasters; baseline: Piasters; months: number; change: Change };
 
-const thresholds = { percent: DEFAULT_NOTABLE_PERCENT, amount: DEFAULT_NOTABLE_AMOUNT };
+const defaultThresholds = { percent: DEFAULT_NOTABLE_PERCENT, amount: DEFAULT_NOTABLE_AMOUNT };
 
 /** Spending in `range` (so far, if it is the current month) against the same days of the last 3 full months before it. */
 export function compareSpending(
@@ -83,6 +84,7 @@ export function compareSpending(
   today: string,
   startDay: number,
   firstDate: string | null,
+  thresholds = defaultThresholds,
 ): SpendingComparison {
   const earlier = fullMonths(firstDate, range.start, startDay, 3);
   const result = monthToDateComparison({ txs, currentMonth: range, today, earlierMonths: earlier });
@@ -118,8 +120,9 @@ export function toListRow(r: TransactionRow, accountName: Map<string, string>, c
 export async function loadSpending(userId: string, requested: string | string[] | undefined) {
   await syncRecurring(userId);
   const today = cairoToday();
-  const [settings, accounts, categories, allRows, pendingRows] = await Promise.all([
+  const [settings, thresholds, accounts, categories, allRows, pendingRows] = await Promise.all([
     getSettings(userId),
+    getInsightThresholds(userId),
     listAccounts(userId, { includeArchived: true }),
     listCategories(userId, { includeArchived: true }),
     listTransactions(userId),
@@ -158,7 +161,7 @@ export async function loadSpending(userId: string, requested: string | string[] 
     }));
 
   const firstDate = firstPostedDate(allRows);
-  const comparison = compareSpending(analytics, range, today, startDay, firstDate);
+  const comparison = compareSpending(analytics, range, today, startDay, firstDate, thresholds);
   // Only categories whose change clears both the percent and the amount bar are worth a line (N4).
   const notable =
     comparison.kind === "comparison"
@@ -170,6 +173,7 @@ export async function loadSpending(userId: string, requested: string | string[] 
               today,
               startDay,
               firstDate,
+              thresholds,
             );
             return c.kind === "comparison" && c.change.isNotable
               ? [

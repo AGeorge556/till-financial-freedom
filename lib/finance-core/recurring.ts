@@ -15,8 +15,21 @@ export type RecurringTemplate = {
   active: boolean;
 };
 
-/** A ledger row generated from a template, of any status (a void row is a skipped occurrence and is never regenerated). */
-export type RecurringRow = { templateId: string; dueDate: string; status: Tx["status"] };
+/**
+ * A ledger row generated from a template, of any status (a void row is a skipped occurrence and is never regenerated).
+ * A pending row carries its own figures: the person may have edited them, and its template may be paused or edited since.
+ */
+export type RecurringRow =
+  | { templateId: string; dueDate: string; status: "posted" | "void" }
+  | {
+      templateId: string;
+      dueDate: string;
+      status: "pending";
+      type: "INCOME" | "EXPENSE";
+      amount: Piasters;
+      categoryId: string | null;
+      accountId: string;
+    };
 
 export type UpcomingItem = {
   templateId: string;
@@ -89,7 +102,9 @@ export function missingOccurrences(
 
 /**
  * Occurrences dated inside the month that still have to be paid or received: pending rows plus ones not generated yet.
- * Posted and skipped (void) occurrences are not here. A month that is already over has none (the projection is the actual).
+ * A pending row is listed with its own amount, category and account, whether or not its template is active. Only
+ * not-yet-generated occurrences come from the templates (active ones). Posted and skipped (void) occurrences are not
+ * here. A month that is already over has none (the projection is the actual). Ordered by due date, then template.
  */
 export function upcomingInMonth(
   templates: RecurringTemplate[],
@@ -98,23 +113,20 @@ export function upcomingInMonth(
   today: string,
 ): UpcomingItem[] {
   if (monthRange.end < today) return [];
-  const status = new Map(existing.map((r) => [`${r.templateId}|${r.dueDate}`, r.status]));
+  const inMonth = (d: string) => d >= monthRange.start && d <= monthRange.end;
+  const generated = new Set(existing.map((r) => `${r.templateId}|${r.dueDate}`));
   const items: UpcomingItem[] = [];
+  for (const r of existing) {
+    if (r.status === "pending" && inMonth(r.dueDate)) {
+      items.push({ templateId: r.templateId, type: r.type, amount: r.amount, categoryId: r.categoryId, accountId: r.accountId, dueDate: r.dueDate, pending: true });
+    }
+  }
   for (const t of templates) {
     for (const dueDate of dueDates(t, monthRange.end)) {
-      const s = status.get(`${t.id}|${dueDate}`);
-      if (dueDate >= monthRange.start && (s === undefined || s === "pending")) {
-        items.push({
-          templateId: t.id,
-          type: t.type,
-          amount: t.amount,
-          categoryId: t.categoryId,
-          accountId: t.accountId,
-          dueDate,
-          pending: s === "pending",
-        });
+      if (inMonth(dueDate) && !generated.has(`${t.id}|${dueDate}`)) {
+        items.push({ templateId: t.id, type: t.type, amount: t.amount, categoryId: t.categoryId, accountId: t.accountId, dueDate, pending: false });
       }
     }
   }
-  return items;
+  return items.sort((x, y) => (x.dueDate === y.dueDate ? (x.templateId < y.templateId ? -1 : 1) : x.dueDate < y.dueDate ? -1 : 1));
 }
