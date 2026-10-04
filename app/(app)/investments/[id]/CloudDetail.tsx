@@ -1,5 +1,5 @@
 import { Amount } from "@/components/Amount";
-import { CloudConfirmForm, CloudEditForm, CloudFlowForm, CloudRateForm } from "@/components/CloudForms";
+import { CloudConfirmForm, CloudFlowForm, CloudRateForm } from "@/components/CloudForms";
 import { formatRate } from "@/components/GoalFormat";
 import { confirmedText, dateText } from "@/components/HoldingFormat";
 import { HoldingArchiveButton, HoldingEditForm } from "@/components/HoldingForms";
@@ -17,12 +17,15 @@ export function CloudDetail({
   view,
   accountName,
   cashAccounts,
+  historyAccounts,
   today,
   history,
 }: {
   view: CloudView;
   accountName: string;
   cashAccounts: AccountOption[];
+  /** Every account, archived ones flagged, so a correction can keep the account an entry already used. */
+  historyAccounts: AccountOption[];
   today: string;
   history: HistoryEntry[];
 }) {
@@ -121,28 +124,29 @@ export function CloudDetail({
           <Panel title="Confirm actual value" hint="Check the value in the provider's app and type it here. It replaces the estimate as the starting point.">
             <CloudConfirmForm holdingId={row.id} today={today} />
           </Panel>
-          <Panel title="Dates and planned contribution">
-            <CloudEditForm
-              holdingId={row.id}
-              startDate={row.startDate}
-              maturityDate={row.maturityDate}
-              contributionAmount={row.contributionAmount}
-              contributionFrequency={row.contributionFrequency}
-            />
-          </Panel>
         </section>
       )}
 
       <section className="mt-8">
         <h2 className="mb-2 text-lg font-semibold tracking-tight">History</h2>
-        <HoldingHistory entries={history} />
-        <p className="mt-2 text-sm text-muted">Voided entries are left out here. Rates and confirmed values are never edited.</p>
+        <HoldingHistory entries={history} holding={{ id: row.id, name: row.name, ticker: null, accountId: row.accountId, kind: "cloud" }} accounts={historyAccounts} today={today} />
+        <p className="mt-2 text-sm text-muted">Tap an entry to correct or remove it. A removed entry stops counting but stays in your history: use Show removed.</p>
       </section>
 
       <section className="mt-8">
         <h2 className="mb-2 text-lg font-semibold tracking-tight">Details</h2>
         <div className={`p-5 ${card}`}>
-          <HoldingEditForm id={row.id} name={row.name} notes={row.notes} />
+          <HoldingEditForm
+            id={row.id}
+            name={row.name}
+            notes={row.notes}
+            cloud={{
+              startDate: row.startDate,
+              maturityDate: row.maturityDate,
+              contributionAmount: row.contributionAmount,
+              contributionFrequency: row.contributionFrequency,
+            }}
+          />
         </div>
       </section>
 

@@ -174,24 +174,24 @@ export async function importBackup(_prev: ImportState, formData: FormData): Prom
           .values(part.map((r) => ({ ...r, userId, voidedAt: when(r.voidedAt), createdAt: new Date(r.createdAt) })));
       }
       for (const part of chunks(b.priceUpdates)) {
-        await tx.insert(priceUpdates).values(part.map((r) => ({ ...r, userId, createdAt: new Date(r.createdAt) })));
+        await tx.insert(priceUpdates).values(part.map((r) => ({ ...r, userId, voidedAt: when(r.voidedAt), createdAt: new Date(r.createdAt) })));
       }
       for (const part of chunks(b.corporateActions)) {
-        await tx.insert(corporateActions).values(part.map((r) => ({ ...r, userId, createdAt: new Date(r.createdAt) })));
+        await tx.insert(corporateActions).values(part.map((r) => ({ ...r, userId, voidedAt: when(r.voidedAt), createdAt: new Date(r.createdAt) })));
       }
       for (const part of chunks(b.liabilityUpdates)) {
-        await tx.insert(liabilityUpdates).values(part.map((r) => ({ ...r, userId, createdAt: new Date(r.createdAt) })));
+        await tx.insert(liabilityUpdates).values(part.map((r) => ({ ...r, userId, voidedAt: when(r.voidedAt), createdAt: new Date(r.createdAt) })));
       }
       for (const part of chunks(b.goldPrices)) {
-        await tx.insert(goldPrices).values(part.map((r) => ({ ...r, userId, createdAt: new Date(r.createdAt) })));
+        await tx.insert(goldPrices).values(part.map((r) => ({ ...r, userId, voidedAt: when(r.voidedAt), createdAt: new Date(r.createdAt) })));
       }
       for (const part of chunks(b.rateHistory)) {
         await tx
           .insert(rateHistory)
-          .values(part.map((r) => ({ ...r, userId, apy: r.apy.toFixed(6), createdAt: new Date(r.createdAt) })));
+          .values(part.map((r) => ({ ...r, userId, apy: r.apy.toFixed(6), voidedAt: when(r.voidedAt), createdAt: new Date(r.createdAt) })));
       }
       for (const part of chunks(b.cloudConfirmations)) {
-        await tx.insert(cloudConfirmations).values(part.map((r) => ({ ...r, userId, createdAt: new Date(r.createdAt) })));
+        await tx.insert(cloudConfirmations).values(part.map((r) => ({ ...r, userId, voidedAt: when(r.voidedAt), createdAt: new Date(r.createdAt) })));
       }
       const assumptions = Object.fromEntries(Object.entries(b.assumptions).map(([k, v]) => [k, rateText(v)]));
       await tx

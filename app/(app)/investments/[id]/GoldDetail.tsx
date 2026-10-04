@@ -16,6 +16,7 @@ export function GoldDetail({
   view,
   accountName,
   cashAccounts,
+  historyAccounts,
   mode,
   today,
   history,
@@ -23,6 +24,8 @@ export function GoldDetail({
   view: HoldingView;
   accountName: string;
   cashAccounts: AccountOption[];
+  /** Every account, archived ones flagged, so a correction can keep the account an entry already used. */
+  historyAccounts: AccountOption[];
   mode: GoldPriceMode;
   today: string;
   history: HistoryEntry[];
@@ -119,14 +122,17 @@ export function GoldDetail({
 
       <section className="mt-8">
         <h2 className="mb-2 text-lg font-semibold tracking-tight">History</h2>
-        <HoldingHistory entries={history} gold />
-        <p className="mt-2 text-sm text-muted">Voided entries are left out here. Gold prices are shared and listed on the Investments page.</p>
+        <HoldingHistory entries={history} holding={option} accounts={historyAccounts} today={today} gold />
+        <p className="mt-2 text-sm text-muted">
+          Tap an entry to correct or remove it. A removed entry stops counting but stays in your history: use Show removed. Gold prices are
+          shared: correct them in the list on the Investments page.
+        </p>
       </section>
 
       <section className="mt-8">
         <h2 className="mb-2 text-lg font-semibold tracking-tight">Details</h2>
         <div className={`p-5 ${card}`}>
-          <HoldingEditForm id={row.id} name={row.name} notes={row.notes} />
+          <HoldingEditForm id={row.id} name={row.name} notes={row.notes} gold={{ karat: row.karat, form: row.form }} />
         </div>
       </section>
 

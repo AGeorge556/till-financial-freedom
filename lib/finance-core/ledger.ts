@@ -1,3 +1,4 @@
+import { overAllocatedBy } from "./goals";
 import type { Piasters } from "./money";
 
 export type TxType =
@@ -114,4 +115,31 @@ export function reconcile(
 ): { ok: boolean; difference: Piasters } {
   const difference = netWorthChange - (savings + marketChange + adjustments);
   return { ok: difference === 0, difference };
+}
+
+export type AccountChangeCheck =
+  | { ok: true }
+  | { ok: false; error: "negative-opening" | "holdings-need-investment" | "earmarks-exceed-balance" };
+
+/**
+ * An edit of an account's type, opening balance or investment flag must keep every existing rule true: only a credit
+ * card opens negative, holdings live only on investment accounts, and goal earmarks stay within the balance. An account
+ * that was already over-allocated may be edited as long as the edit does not make it worse (decreases always pass).
+ */
+export function validateAccountChange(input: {
+  type: string;
+  isInvestment: boolean;
+  openingBalance: Piasters;
+  holdingsOnAccount: number;
+  allocatedOnAccount: Piasters;
+  balanceBefore: Piasters;
+  balanceAfter: Piasters;
+}): AccountChangeCheck {
+  if (input.openingBalance < 0 && input.type !== "credit_card") return { ok: false, error: "negative-opening" };
+  if (input.holdingsOnAccount > 0 && !input.isInvestment) return { ok: false, error: "holdings-need-investment" };
+  const after = overAllocatedBy(input.balanceAfter, input.allocatedOnAccount);
+  if (after > 0 && after > overAllocatedBy(input.balanceBefore, input.allocatedOnAccount)) {
+    return { ok: false, error: "earmarks-exceed-balance" };
+  }
+  return { ok: true };
 }

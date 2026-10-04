@@ -15,12 +15,12 @@ import { Panel, Row, StaleBadge } from "@/components/HoldingParts";
 import { HoldingPL } from "@/components/HoldingPL";
 import { HoldingPrivate } from "@/components/HoldingPrivate";
 import { BackLink, card } from "@/components/ui";
-import { listAccounts } from "@/db/queries";
+import { listAccounts, listPriceUpdates, listTransactions, loadRemovedRecords } from "@/db/queries";
 import { requireUserId } from "@/lib/auth";
 import { cairoToday } from "@/lib/finance-core/time";
 import { CloudDetail } from "./CloudDetail";
 import { GoldDetail } from "./GoldDetail";
-import { holdingHistory, loadInvestments } from "../data";
+import { holdingHistory, loadInvestments, removedHistory } from "../data";
 
 export const metadata: Metadata = { title: "Holding" };
 
@@ -33,15 +33,32 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
   if (!UUID.test(id)) notFound();
 
   const today = cairoToday();
-  const [inv, accounts] = await Promise.all([loadInvestments(userId, today), listAccounts(userId, { includeArchived: true })]);
+  const [inv, accounts, removedRecords, allTransactions, priceRows] = await Promise.all([
+    loadInvestments(userId, today),
+    listAccounts(userId, { includeArchived: true }),
+    loadRemovedRecords(userId),
+    listTransactions(userId),
+    listPriceUpdates(userId, id),
+  ]);
   const cloud = inv.clouds.find((c) => c.row.id === id);
   const view = inv.views.find((v) => v.row.id === id);
   const row = cloud?.row ?? view?.row;
   if (!row) notFound();
   const cashAccounts = accounts.filter((a) => !a.archivedAt).map((a) => ({ id: a.id, name: a.name, archived: false }));
   const accountName = accounts.find((a) => a.id === row.accountId)?.name ?? "an account";
-  const history = holdingHistory(inv.portfolio, id, row.priceUpdates);
-  if (cloud) return <CloudDetail view={cloud} accountName={accountName} cashAccounts={cashAccounts} today={today} history={history} />;
+  // A gold row's prices are the shared ones, which cannot be corrected here.
+  const history = holdingHistory(
+    inv.portfolio,
+    id,
+    row.kind === "gold" ? row.priceUpdates : priceRows,
+    removedHistory(allTransactions, removedRecords),
+  );
+  const historyAccounts = accounts.map((a) => ({ id: a.id, name: a.name, archived: a.archivedAt !== null }));
+  if (cloud) {
+    return (
+      <CloudDetail view={cloud} accountName={accountName} cashAccounts={cashAccounts} historyAccounts={historyAccounts} today={today} history={history} />
+    );
+  }
   if (!view) notFound();
   if (row.kind === "gold") {
     return (
@@ -49,6 +66,7 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
         view={view}
         accountName={accountName}
         cashAccounts={cashAccounts}
+        historyAccounts={historyAccounts}
         mode={inv.portfolio.settings.goldPriceMode}
         today={today}
         history={history}
@@ -141,8 +159,8 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
 
       <section className="mt-8">
         <h2 className="mb-2 text-lg font-semibold tracking-tight">History</h2>
-        <HoldingHistory entries={history} />
-        <p className="mt-2 text-sm text-muted">Voided entries are left out here. Prices and corporate actions are never edited.</p>
+        <HoldingHistory entries={history} holding={option} accounts={historyAccounts} today={today} />
+        <p className="mt-2 text-sm text-muted">Tap an entry to correct or remove it. A removed entry stops counting but stays in your history: use Show removed.</p>
       </section>
 
       <section className="mt-8">

@@ -4,9 +4,11 @@ import {
   getBudgetThresholds,
   getInsightThresholds,
   getSettings,
+  type HoldingRow,
   listAccounts,
   listBudgets,
   listCategories,
+  listHoldings,
   listPendingRecurring,
   listTransactions,
   loadMonth,
@@ -97,7 +99,44 @@ export const firstPostedDate = (rows: TransactionRow[]): string | null =>
 
 export type Share = { key: string | null; name: string; total: Piasters };
 
-export function toListRow(r: TransactionRow, accountName: Map<string, string>, categoryName: Map<string, string>): ListRow {
+/** What a row needs to open the sheet of its own kind: its holding, and for a loan payment both of its rows as one. */
+export type ListContext = { holdings: Map<string, NonNullable<ListRow["holding"]>>; payments: Map<string, NonNullable<ListRow["payment"]>> };
+
+/**
+ * The two rows of a loan payment share loan, date, account, stamp and status; a removed pair also shares its voided_at,
+ * which separates an old version from the one that replaced it (an edit keeps the stamp when the date is unchanged).
+ */
+export function listContext(holdingRows: HoldingRow[], rows: TransactionRow[]): ListContext {
+  const holdings = new Map(
+    holdingRows.map((h) => [h.id, { id: h.id, name: h.name, ticker: h.ticker, kind: h.kind, accountId: h.accountId }]),
+  );
+  const key = (r: TransactionRow) =>
+    `${r.liabilityId}|${r.date}|${r.fromAccountId}|${r.createdAt.getTime()}|${r.status}|${r.voidedAt?.getTime() ?? ""}`;
+  const pairs = new Map<string, NonNullable<ListRow["payment"]>>();
+  for (const r of rows) {
+    if (r.liabilityId === null) continue;
+    const pair = pairs.get(key(r)) ?? { principal: 0, interest: 0, categoryId: null };
+    if (r.type === "LIABILITY_PAYMENT") pair.principal = r.amount;
+    else {
+      pair.interest = r.amount;
+      pair.categoryId = r.categoryId;
+    }
+    pairs.set(key(r), pair);
+  }
+  const payments = new Map<string, NonNullable<ListRow["payment"]>>();
+  for (const r of rows) {
+    const pair = r.liabilityId === null ? undefined : pairs.get(key(r));
+    if (pair) payments.set(r.id, pair);
+  }
+  return { holdings, payments };
+}
+
+export function toListRow(
+  r: TransactionRow,
+  accountName: Map<string, string>,
+  categoryName: Map<string, string>,
+  context: ListContext,
+): ListRow {
   const from = r.fromAccountId ? accountName.get(r.fromAccountId) : undefined;
   const to = r.toAccountId ? accountName.get(r.toAccountId) : undefined;
   return {
@@ -111,6 +150,13 @@ export function toListRow(r: TransactionRow, accountName: Map<string, string>, c
     fromAccountId: r.fromAccountId,
     toAccountId: r.toAccountId,
     liabilityId: r.liabilityId,
+    payment: context.payments.get(r.id) ?? null,
+    holding: r.holdingId ? (context.holdings.get(r.holdingId) ?? null) : null,
+    quantity: r.quantity,
+    unitPrice: r.unitPrice,
+    fee: r.fee,
+    taxWithheld: r.taxWithheld,
+    grossAmount: r.grossAmount,
     recurringTemplateId: r.recurringTemplateId,
     category: r.categoryId ? (categoryName.get(r.categoryId) ?? null) : null,
     account: r.type === "TRANSFER" ? `${from ?? "?"} → ${to ?? "?"}` : (from ?? to ?? "?"),
@@ -120,14 +166,16 @@ export function toListRow(r: TransactionRow, accountName: Map<string, string>, c
 export async function loadSpending(userId: string, requested: string | string[] | undefined) {
   await syncRecurring(userId);
   const today = cairoToday();
-  const [settings, thresholds, accounts, categories, allRows, pendingRows] = await Promise.all([
+  const [settings, thresholds, accounts, categories, allRows, pendingRows, holdingRows] = await Promise.all([
     getSettings(userId),
     getInsightThresholds(userId),
     listAccounts(userId, { includeArchived: true }),
     listCategories(userId, { includeArchived: true }),
     listTransactions(userId),
     listPendingRecurring(userId),
+    listHoldings(userId, { includeArchived: true }),
   ]);
+  const context = listContext(holdingRows, allRows);
   const startDay = settings.monthStartDay;
   const current = financialMonth(today, startDay).start.slice(0, 7);
   // The URL carries only the month a financial month starts in.
@@ -142,8 +190,8 @@ export async function loadSpending(userId: string, requested: string | string[] 
   // Pending recurring rows (any month) are listed first, with Confirm and Skip; the day list keeps everything else.
   const rows = monthData.txs
     .filter((r) => !(r.status === "pending" && r.recurringTemplateId !== null))
-    .map((r) => toListRow(r, accountName, categoryName));
-  const pending = pendingRows.map((r) => toListRow(r, accountName, categoryName));
+    .map((r) => toListRow(r, accountName, categoryName, context));
+  const pending = pendingRows.map((r) => toListRow(r, accountName, categoryName, context));
 
   const analytics = allRows.map(toAnalyticsTx);
   const inMonth = analytics.filter((t) => t.date >= range.start && t.date <= range.end);

@@ -167,6 +167,11 @@ export default async function Home() {
             <h2 className="text-lg font-semibold tracking-tight">This month</h2>
             <p className="text-sm text-muted">{formatRange(start, end)}</p>
           </div>
+          <p className="text-sm">
+            <Link href="/spending#transactions-heading" className="inline-flex min-h-11 items-center underline">
+              See or change this month's entries
+            </Link>
+          </p>
           <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-5">
             <Stat label="Income">
               <Amount value={month.totalIncome} />

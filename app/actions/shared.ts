@@ -1,5 +1,22 @@
+import type { db } from "@/db";
+
 // Plain module (not "use server"): helpers shared by the action files. Actions return this to useActionState.
 export type ActionState = { error?: string };
+
+export type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+// A refusal raised inside a database transaction: it rolls the transaction back and becomes the action's error.
+export class Refused extends Error {}
+
+export const refuse = (message: string): never => {
+  throw new Refused(message);
+};
+
+/** The message for a constraint a form can trip (by Postgres constraint name), or undefined for anything else, which is a bug. */
+export function knownViolation(e: unknown, known: Record<string, string>): string | undefined {
+  const name = (e as { cause?: { constraint_name?: string } })?.cause?.constraint_name;
+  return name ? known[name] : undefined;
+}
 
 export const NAME_ERROR = "Enter a name (up to 80 characters).";
 

@@ -1,19 +1,22 @@
 "use server";
 
-import { and, eq, ne } from "drizzle-orm";
+import { and, eq, isNull, ne } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { db } from "@/db";
-import { listCloudRecords, listHoldingEvents } from "@/db/queries";
+import { listCloudRecords, listHoldingHistoryRows } from "@/db/queries";
 import { accounts, corporateActionKind, corporateActions, holdings, priceUpdates, transactions } from "@/db/schema";
 import { requireUserId } from "@/lib/auth";
+import { proposedHoldingEvents, replacementStamp } from "@/lib/corrections";
 import { validateCloudHistory } from "@/lib/finance-core/clouds";
 import { lineValue } from "@/lib/finance-core/holdings";
 import { parseEGP, type Piasters } from "@/lib/finance-core/money";
-import { dividendCash, type HoldingEvent, purchaseCash, saleCash, validateHistory } from "@/lib/finance-core/portfolio";
+import { dividendCash, purchaseCash, saleCash, validateHistory } from "@/lib/finance-core/portfolio";
 import { cairoToday } from "@/lib/finance-core/time";
-import { type ActionState, id, isRealDate, str } from "./shared";
+import { type ActionState, id, isRealDate, knownViolation, Refused, refuse, str, type Tx } from "./shared";
 
 const NOT_FOUND = "Holding not found.";
+const TX_NOT_FOUND = "Investment transaction not found.";
+const RECORD_NOT_FOUND = "Record not found or already removed.";
 const ARCHIVED = "This holding is archived. Restore it first.";
 const CLOUD = "A Savings Cloud takes deposits and withdrawals, not units. Use its own actions.";
 const GOLD = "Gold has no dividends and is priced from the gold prices, not per holding.";
@@ -25,15 +28,15 @@ const DATE_ERROR = "Enter a valid date.";
 const NOTE_ERROR = "Note is too long (500 characters at most).";
 const MAX_NOTE = 500;
 
-type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
-type Holding = typeof holdings.$inferSelect;
-
-// A refusal raised inside a database transaction: it rolls the transaction back and becomes the action's error.
-class Refused extends Error {}
-
-const refuse = (message: string): never => {
-  throw new Refused(message);
+// Only the constraint names this file can trip, translated; anything else is a bug and propagates.
+const KNOWN_VIOLATIONS: Record<string, string> = {
+  price_updates_price_check: PRICE_ERROR,
+  corporate_actions_kind_values_check: "Check the quantity or ratio.",
+  transactions_amount_check: MONEY_ERROR,
+  transactions_fee_tax_non_negative_check: MONEY_ERROR,
 };
+
+type Holding = typeof holdings.$inferSelect;
 
 // Quantity, price and ratio are NUMERIC(20,6): plain digits, at most 14 whole and 6 decimal places. Never Number().
 // ponytail: same pattern as the engine's private parser in finance-core/holdings.ts; export one from there if a third copy appears.
@@ -49,12 +52,6 @@ const decimal = (formData: FormData, key: string): string | null => {
 function money(formData: FormData, key: string, optional: boolean): Piasters | null {
   const text = str(formData, key);
   return text === "" && optional ? 0 : parseEGP(text);
-}
-
-/** The engine's own validation errors (RangeError) are readable messages; anything else propagates. */
-function engineError(e: unknown): ActionState {
-  if (e instanceof RangeError) return { error: e.message };
-  throw e;
 }
 
 /**
@@ -83,27 +80,37 @@ async function mutate(
     });
   } catch (e) {
     if (e instanceof Refused) return { error: e.message };
-    throw e;
+    const message = knownViolation(e, KNOWN_VIOLATIONS);
+    if (!message) throw e;
+    return { error: message };
   }
   revalidatePath("/", "layout");
   return {};
 }
 
-/** The cash account must be the signed-in user's own and still active. */
-async function requireAccount(tx: Tx, userId: string, accountId: string | null): Promise<string> {
+/** The cash account must be the signed-in user's own and still active (an edit may keep the archived one it already has). */
+async function requireAccount(tx: Tx, userId: string, accountId: string | null, keepId?: string | null): Promise<string> {
   const [account] = accountId
     ? await tx
         .select({ id: accounts.id, archivedAt: accounts.archivedAt })
         .from(accounts)
         .where(and(eq(accounts.id, accountId), eq(accounts.userId, userId)))
     : [];
-  return account && !account.archivedAt ? account.id : refuse(ACCOUNT_ERROR);
+  return account && (!account.archivedAt || account.id === keepId) ? account.id : refuse(ACCOUNT_ERROR);
 }
 
-/** Rule F: refuse when replaying the holding's history (plus `add`) makes any position impossible on any date. */
-async function assertHistory(tx: Tx, userId: string, holdingId: string, add?: HoldingEvent, lead?: string): Promise<void> {
-  const events = await listHoldingEvents(userId, holdingId, tx);
-  const check = validateHistory(add ? [...events, add] : events);
+/**
+ * Rule F: refuse when the holding's history, with `change` applied (a row added, dropped or replaced), makes any position
+ * impossible on any date. The history is read inside the transaction, so it is whole and includes no voided row.
+ */
+async function assertHistory(
+  tx: Tx,
+  userId: string,
+  holdingId: string,
+  change: Parameters<typeof proposedHoldingEvents>[1],
+  lead?: string,
+): Promise<void> {
+  const check = validateHistory(proposedHoldingEvents(await listHoldingHistoryRows(userId, holdingId, tx), change));
   // Generic text: the engine's message names the quantity held, which privacy mode could not hide.
   if (!check.ok) refuse(`${lead ? `${lead}: ` : ""}you would not hold enough units on ${check.date}.`);
 }
@@ -119,142 +126,154 @@ function readCommon(formData: FormData): Common | string {
   return { date, note: note || null, accountId: id(formData, "accountId") };
 }
 
-/** Buy: amount = quantity x unit price + fee, taken from the cash account. The fee goes into cost basis. */
+type TradeType = "INVESTMENT_PURCHASE" | "INVESTMENT_SALE" | "DIVIDEND";
+const isTradeType = (type: string): type is TradeType =>
+  type === "INVESTMENT_PURCHASE" || type === "INVESTMENT_SALE" || type === "DIVIDEND";
+
+type Trade = {
+  type: TradeType;
+  amount: Piasters;
+  quantity: string | null;
+  unitPrice: string | null;
+  fee: Piasters;
+  tax: Piasters | null;
+  gross: Piasters | null;
+};
+
+/**
+ * What a buy, sell or dividend form means, in the columns it writes. Buy: amount = quantity x unit price + fee, taken
+ * from the cash account (the fee goes into cost basis). Sell: amount = net cash received (quantity x price - fee - tax
+ * withheld), gross = quantity x price. Dividend: net = gross - tax withheld, counted as investment income.
+ */
+function parseTrade(type: TradeType, formData: FormData): Trade | string {
+  if (type === "DIVIDEND") {
+    const gross = money(formData, "gross", false);
+    const tax = money(formData, "taxWithheld", true);
+    if (gross === null || tax === null) return MONEY_ERROR;
+    return engine(() => ({ type, amount: dividendCash(gross, tax), quantity: null, unitPrice: null, fee: 0, tax, gross }));
+  }
+  const quantity = decimal(formData, "quantity");
+  if (quantity === null || isZero(quantity)) return QUANTITY_ERROR;
+  const unitPrice = decimal(formData, "unitPrice");
+  if (unitPrice === null) return PRICE_ERROR;
+  const fee = money(formData, "fee", true);
+  const tax = type === "INVESTMENT_SALE" ? money(formData, "taxWithheld", true) : null;
+  if (fee === null || (type === "INVESTMENT_SALE" && tax === null)) return MONEY_ERROR;
+  return engine(() =>
+    type === "INVESTMENT_PURCHASE"
+      ? { type, amount: purchaseCash(quantity, unitPrice, fee), quantity, unitPrice, fee, tax: null, gross: null }
+      : { type, amount: saleCash(quantity, unitPrice, fee, tax!), quantity, unitPrice, fee, tax, gross: lineValue(quantity, unitPrice) },
+  );
+}
+
+/** The engine's own validation errors (RangeError) are readable messages; anything else propagates. */
+function engine<T>(run: () => T): T | string {
+  try {
+    return run();
+  } catch (e) {
+    if (e instanceof RangeError) return e.message;
+    throw e;
+  }
+}
+
+/** The ledger columns of a trade: a buy leaves the account, a sell or dividend lands in it. */
+const tradeColumns = (t: Trade, accountId: string) => ({
+  type: t.type,
+  amount: t.amount,
+  quantity: t.quantity,
+  unitPrice: t.unitPrice,
+  fee: t.fee,
+  taxWithheld: t.tax,
+  grossAmount: t.gross,
+  fromAccountId: t.type === "INVESTMENT_PURCHASE" ? accountId : null,
+  toAccountId: t.type === "INVESTMENT_PURCHASE" ? null : accountId,
+});
+
+async function addTrade(type: TradeType, formData: FormData): Promise<ActionState> {
+  const userId = await requireUserId();
+  const trade = parseTrade(type, formData);
+  if (typeof trade === "string") return { error: trade };
+  const common = readCommon(formData);
+  if (typeof common === "string") return { error: common };
+
+  return mutate(userId, id(formData, "holdingId"), async (tx, holding) => {
+    if (type === "DIVIDEND" && holding.kind === "gold") refuse(GOLD);
+    const accountId = await requireAccount(tx, userId, common.accountId);
+    const createdAt = new Date();
+    const columns = tradeColumns(trade, accountId);
+    await assertHistory(tx, userId, holding.id, {
+      addTrade: { ...columns, date: common.date, status: "posted", holdingId: holding.id, createdAt },
+    });
+    await tx
+      .insert(transactions)
+      .values({ userId, holdingId: holding.id, date: common.date, note: common.note, createdAt, ...columns });
+  });
+}
+
 export async function buyHolding(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  const userId = await requireUserId();
-  const quantity = decimal(formData, "quantity");
-  if (quantity === null || isZero(quantity)) return { error: QUANTITY_ERROR };
-  const unitPrice = decimal(formData, "unitPrice");
-  if (unitPrice === null) return { error: PRICE_ERROR };
-  const fee = money(formData, "fee", true);
-  if (fee === null) return { error: MONEY_ERROR };
-  const common = readCommon(formData);
-  if (typeof common === "string") return { error: common };
-
-  let amount: Piasters;
-  try {
-    amount = purchaseCash(quantity, unitPrice, fee);
-  } catch (e) {
-    return engineError(e);
-  }
-
-  return mutate(userId, id(formData, "holdingId"), async (tx, holding) => {
-    const accountId = await requireAccount(tx, userId, common.accountId);
-    const createdAt = new Date();
-    await assertHistory(tx, userId, holding.id, {
-      type: "purchase",
-      date: common.date,
-      createdAt: createdAt.toISOString(),
-      quantity,
-      price: unitPrice,
-      fee,
-    });
-    await tx.insert(transactions).values({
-      userId,
-      type: "INVESTMENT_PURCHASE",
-      date: common.date,
-      amount,
-      fromAccountId: accountId,
-      holdingId: holding.id,
-      quantity,
-      unitPrice,
-      fee,
-      note: common.note,
-      createdAt,
-    });
-  });
+  return addTrade("INVESTMENT_PURCHASE", formData);
 }
 
-/** Sell: amount = net cash received (quantity x price - fee - tax withheld); gross_amount = quantity x price. */
 export async function sellHolding(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  const userId = await requireUserId();
-  const quantity = decimal(formData, "quantity");
-  if (quantity === null || isZero(quantity)) return { error: QUANTITY_ERROR };
-  const unitPrice = decimal(formData, "unitPrice");
-  if (unitPrice === null) return { error: PRICE_ERROR };
-  const fee = money(formData, "fee", true);
-  const tax = money(formData, "taxWithheld", true);
-  if (fee === null || tax === null) return { error: MONEY_ERROR };
-  const common = readCommon(formData);
-  if (typeof common === "string") return { error: common };
-
-  let amount: Piasters;
-  let grossAmount: Piasters;
-  try {
-    amount = saleCash(quantity, unitPrice, fee, tax);
-    grossAmount = lineValue(quantity, unitPrice);
-  } catch (e) {
-    return engineError(e);
-  }
-
-  return mutate(userId, id(formData, "holdingId"), async (tx, holding) => {
-    const accountId = await requireAccount(tx, userId, common.accountId);
-    const createdAt = new Date();
-    await assertHistory(tx, userId, holding.id, {
-      type: "sale",
-      date: common.date,
-      createdAt: createdAt.toISOString(),
-      quantity,
-      price: unitPrice,
-      fee,
-      tax,
-    });
-    await tx.insert(transactions).values({
-      userId,
-      type: "INVESTMENT_SALE",
-      date: common.date,
-      amount,
-      toAccountId: accountId,
-      holdingId: holding.id,
-      quantity,
-      unitPrice,
-      fee,
-      taxWithheld: tax,
-      grossAmount,
-      note: common.note,
-      createdAt,
-    });
-  });
+  return addTrade("INVESTMENT_SALE", formData);
 }
 
-/** Dividend: gross and tax withheld typed, net = gross - tax lands in the account. Counts as investment income. */
 export async function recordDividend(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  return addTrade("DIVIDEND", formData);
+}
+
+/**
+ * Corrects a buy, sell or dividend (units or grams): the old row is voided and the corrected one inserted in the same
+ * transaction, only if the holding's whole history with the correction still holds. The type cannot change.
+ */
+export async function editInvestmentTransaction(_prev: ActionState, formData: FormData): Promise<ActionState> {
   const userId = await requireUserId();
-  const gross = money(formData, "gross", false);
-  const tax = money(formData, "taxWithheld", true);
-  if (gross === null || tax === null) return { error: MONEY_ERROR };
+  const txId = id(formData, "id");
+  const [row] = txId
+    ? await db
+        .select({ holdingId: transactions.holdingId, type: transactions.type })
+        .from(transactions)
+        .where(and(eq(transactions.id, txId), eq(transactions.userId, userId)))
+    : [];
+  if (!txId || !row?.holdingId || !isTradeType(row.type)) return { error: TX_NOT_FOUND };
+  const trade = parseTrade(row.type, formData);
+  if (typeof trade === "string") return { error: trade };
   const common = readCommon(formData);
   if (typeof common === "string") return { error: common };
 
-  let amount: Piasters;
-  try {
-    amount = dividendCash(gross, tax);
-  } catch (e) {
-    return engineError(e);
-  }
-
-  return mutate(userId, id(formData, "holdingId"), async (tx, holding) => {
-    if (holding.kind === "gold") refuse(GOLD);
-    const accountId = await requireAccount(tx, userId, common.accountId);
-    const createdAt = new Date();
-    await assertHistory(tx, userId, holding.id, {
-      type: "dividend",
-      date: common.date,
-      createdAt: createdAt.toISOString(),
-      gross,
-      tax,
-    });
+  return mutate(userId, row.holdingId, async (tx, holding) => {
+    const [old] = await tx
+      .select()
+      .from(transactions)
+      .where(
+        and(
+          eq(transactions.id, txId),
+          eq(transactions.userId, userId),
+          eq(transactions.holdingId, holding.id),
+          eq(transactions.status, "posted"),
+        ),
+      )
+      .for("update");
+    if (!old) return refuse(TX_NOT_FOUND);
+    const accountId = await requireAccount(tx, userId, common.accountId, old.fromAccountId ?? old.toAccountId);
+    const createdAt = replacementStamp(old, common.date);
+    const columns = tradeColumns(trade, accountId);
+    await assertHistory(
+      tx,
+      userId,
+      holding.id,
+      { dropTrade: old.id, addTrade: { ...columns, date: common.date, status: "posted", holdingId: holding.id, createdAt } },
+      "That change would leave an impossible position",
+    );
+    await tx.update(transactions).set({ status: "void", voidedAt: new Date() }).where(eq(transactions.id, old.id));
     await tx.insert(transactions).values({
       userId,
-      type: "DIVIDEND",
-      date: common.date,
-      amount,
-      toAccountId: accountId,
       holdingId: holding.id,
-      grossAmount: gross,
-      taxWithheld: tax,
+      date: common.date,
       note: common.note,
       createdAt,
+      replacesId: old.id,
+      ...columns,
     });
   });
 }
@@ -262,39 +281,91 @@ export async function recordDividend(_prev: ActionState, formData: FormData): Pr
 type ActionKind = (typeof corporateActionKind.enumValues)[number];
 
 /** BONUS adds units, SPLIT multiplies them by a ratio (below 1 is a reverse split), WRITE_OFF zeroes them. No cash moves. */
-export async function addCorporateAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  const userId = await requireUserId();
+function parseAction(formData: FormData): { kind: ActionKind; quantity: string | null; ratio: string | null } | string {
   const kind = str(formData, "kind") as ActionKind;
-  if (!corporateActionKind.enumValues.includes(kind)) return { error: "Choose bonus, split or write-off." };
-
+  if (!corporateActionKind.enumValues.includes(kind)) return "Choose bonus, split or write-off.";
   let quantity: string | null = null;
   let ratio: string | null = null;
   if (kind === "BONUS") {
     quantity = decimal(formData, "quantity");
-    if (quantity === null || isZero(quantity)) return { error: "Enter the bonus units, above zero with up to 6 decimals." };
+    if (quantity === null || isZero(quantity)) return "Enter the bonus units, above zero with up to 6 decimals.";
   } else if (kind === "SPLIT") {
     ratio = decimal(formData, "ratio");
-    if (ratio === null || isZero(ratio)) return { error: "Enter the split ratio above zero, like 2 for 2-for-1 or 0.5 for a reverse split." };
+    if (ratio === null || isZero(ratio)) return "Enter the split ratio above zero, like 2 for 2-for-1 or 0.5 for a reverse split.";
   }
+  return { kind, quantity, ratio };
+}
+
+export async function addCorporateAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  const userId = await requireUserId();
+  const action = parseAction(formData);
+  if (typeof action === "string") return { error: action };
   const common = readCommon(formData);
   if (typeof common === "string") return { error: common };
 
   return mutate(userId, id(formData, "holdingId"), async (tx, holding) => {
     const createdAt = new Date();
-    const at = { date: common.date, createdAt: createdAt.toISOString() };
+    const row = { holdingId: holding.id, ...action, date: common.date, createdAt };
+    await assertHistory(tx, userId, holding.id, { addAction: row });
+    await tx.insert(corporateActions).values({ userId, ...row, note: common.note });
+  });
+}
+
+/** Edit (replace = true) or remove (false) a corporate action: void it, and for an edit insert the corrected one. */
+async function correctAction(formData: FormData, replace: boolean): Promise<ActionState> {
+  const userId = await requireUserId();
+  const rowId = id(formData, "id");
+  const action = replace ? parseAction(formData) : null;
+  if (typeof action === "string") return { error: action };
+  const common = replace ? readCommon(formData) : null;
+  if (typeof common === "string") return { error: common };
+  const [parent] = rowId
+    ? await db
+        .select({ holdingId: corporateActions.holdingId })
+        .from(corporateActions)
+        .where(and(eq(corporateActions.id, rowId), eq(corporateActions.userId, userId)))
+    : [];
+  if (!rowId || !parent) return { error: RECORD_NOT_FOUND };
+
+  return mutate(userId, parent.holdingId, async (tx, holding) => {
+    const [old] = await tx
+      .select()
+      .from(corporateActions)
+      .where(
+        and(
+          eq(corporateActions.id, rowId),
+          eq(corporateActions.userId, userId),
+          eq(corporateActions.holdingId, holding.id),
+          isNull(corporateActions.voidedAt),
+        ),
+      )
+      .for("update");
+    if (!old) return refuse(RECORD_NOT_FOUND);
+    const replacement =
+      action && common
+        ? { holdingId: holding.id, ...action, date: common.date, createdAt: replacementStamp(old, common.date) }
+        : undefined;
     await assertHistory(
       tx,
       userId,
       holding.id,
-      kind === "BONUS" ? { ...at, type: "bonus", quantity: quantity! } : kind === "SPLIT" ? { ...at, type: "split", ratio: ratio! } : { ...at, type: "writeOff" },
+      { dropAction: old.id, addAction: replacement },
+      replace ? "That change would leave an impossible position" : "Removing this would leave an impossible position",
     );
-    await tx
-      .insert(corporateActions)
-      .values({ userId, holdingId: holding.id, kind, date: common.date, quantity, ratio, note: common.note, createdAt });
+    await tx.update(corporateActions).set({ voidedAt: new Date() }).where(eq(corporateActions.id, old.id));
+    if (replacement) await tx.insert(corporateActions).values({ userId, ...replacement, note: common!.note });
   });
 }
 
-/** Appends a price. Never edits one: a wrong price is fixed by adding a newer update for the same date. */
+export async function editCorporateAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  return correctAction(formData, true);
+}
+
+export async function removeCorporateAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  return correctAction(formData, false);
+}
+
+/** Appends a price. A wrong one is corrected with editPriceUpdate or removePriceUpdate, which void it. */
 export async function addPriceUpdate(_prev: ActionState, formData: FormData): Promise<ActionState> {
   const userId = await requireUserId();
   const price = decimal(formData, "price");
@@ -309,6 +380,54 @@ export async function addPriceUpdate(_prev: ActionState, formData: FormData): Pr
   });
 }
 
+/** Edit (replace = true) or remove (false) a price update. A price feeds no validator, so there is no history to re-check. */
+async function correctPrice(formData: FormData, replace: boolean): Promise<ActionState> {
+  const userId = await requireUserId();
+  const rowId = id(formData, "id");
+  const price = replace ? decimal(formData, "price") : null;
+  if (replace && price === null) return { error: PRICE_ERROR };
+  const date = replace ? str(formData, "date") || cairoToday() : "";
+  if (replace && !isRealDate(date)) return { error: DATE_ERROR };
+  if (replace && date > cairoToday()) return { error: "A price cannot be dated in the future." };
+  const [parent] = rowId
+    ? await db
+        .select({ holdingId: priceUpdates.holdingId })
+        .from(priceUpdates)
+        .where(and(eq(priceUpdates.id, rowId), eq(priceUpdates.userId, userId)))
+    : [];
+  if (!rowId || !parent) return { error: RECORD_NOT_FOUND };
+
+  return mutate(userId, parent.holdingId, async (tx, holding) => {
+    const [old] = await tx
+      .select()
+      .from(priceUpdates)
+      .where(
+        and(
+          eq(priceUpdates.id, rowId),
+          eq(priceUpdates.userId, userId),
+          eq(priceUpdates.holdingId, holding.id),
+          isNull(priceUpdates.voidedAt),
+        ),
+      )
+      .for("update");
+    if (!old) return refuse(RECORD_NOT_FOUND);
+    await tx.update(priceUpdates).set({ voidedAt: new Date() }).where(eq(priceUpdates.id, old.id));
+    if (price !== null) {
+      await tx
+        .insert(priceUpdates)
+        .values({ userId, holdingId: holding.id, date, price, createdAt: replacementStamp(old, date) });
+    }
+  });
+}
+
+export async function editPriceUpdate(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  return correctPrice(formData, true);
+}
+
+export async function removePriceUpdate(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  return correctPrice(formData, false);
+}
+
 /**
  * Voids a buy, sell, dividend, or a cloud deposit or withdrawal. Refused if the position would go impossible on any
  * date, or (a cloud) if a withdrawal would end up larger than the estimated value.
@@ -316,13 +435,13 @@ export async function addPriceUpdate(_prev: ActionState, formData: FormData): Pr
 export async function voidInvestmentTransaction(_prev: ActionState, formData: FormData): Promise<ActionState> {
   const userId = await requireUserId();
   const txId = id(formData, "id");
-  if (!txId) return { error: "Transaction not found." };
+  if (!txId) return { error: TX_NOT_FOUND };
 
   const [row] = await db
     .select({ holdingId: transactions.holdingId })
     .from(transactions)
     .where(and(eq(transactions.id, txId), eq(transactions.userId, userId)));
-  if (!row?.holdingId) return { error: "Investment transaction not found." };
+  if (!row?.holdingId) return { error: TX_NOT_FOUND };
 
   return mutate(userId, row.holdingId, async (tx, holding) => {
     const voided = await tx
@@ -337,7 +456,7 @@ export async function voidInvestmentTransaction(_prev: ActionState, formData: Fo
         refuse("Voiding this would leave a withdrawal larger than the cloud's estimated value.");
       }
     } else {
-      await assertHistory(tx, userId, holding.id, undefined, "Voiding this would leave an impossible position");
+      await assertHistory(tx, userId, holding.id, {}, "Voiding this would leave an impossible position");
     }
   }, true);
 }

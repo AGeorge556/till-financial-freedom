@@ -33,6 +33,7 @@ import { addDays, missingOccurrences, type RecurringRow, type RecurringTemplate 
 import type { ReminderInput, ReminderSwitches } from "@/lib/finance-core/reminders";
 import type { ScenarioInput } from "@/lib/finance-core/scenario";
 import { cairoToday, financialMonth } from "@/lib/finance-core/time";
+import { visibleRows } from "@/lib/finance-core/voided";
 import { eventsByHolding, type LedgerEvent, toHoldingEvents } from "@/lib/backup";
 import { db } from "./index";
 import {
@@ -81,6 +82,8 @@ function perRequest<A extends unknown[], R>(load: (...args: A) => PromiseLike<R>
     return result;
   };
 }
+
+const isoOrNull = (d: Date | null) => (d === null ? null : d.toISOString());
 
 // The archived-or-not variants read the same rows and filter, so the layout and a page share one query.
 const allAccounts = perRequest((userId: string) =>
@@ -290,7 +293,8 @@ type Executor = Pick<typeof db, "select">;
 
 export type HoldingRow = typeof holdings.$inferSelect;
 export type CorporateActionRow = typeof corporateActions.$inferSelect;
-export type HoldingPriceUpdate = PriceUpdate & { id: string; holdingId: string };
+/** `voidedAt` is set only on rows from loadRemovedRecords: every other loader leaves voided rows out. */
+export type HoldingPriceUpdate = PriceUpdate & { id: string; holdingId: string; voidedAt: string | null };
 /** What clouds.ts needs to value one Savings Cloud. */
 export type CloudRecords = { confirmations: Confirmation[]; cashFlows: CashFlow[]; rates: RateChange[] };
 /**
@@ -309,9 +313,9 @@ export type WealthSettings = {
   staleDaysGold: number;
   staleDaysClouds: number;
 };
-export type GoldPriceEntry = GoldPrice & { id: string };
-export type RateHistoryEntry = RateChange & { id: string; holdingId: string };
-export type CloudConfirmationEntry = Confirmation & { id: string; holdingId: string };
+export type GoldPriceEntry = GoldPrice & { id: string; voidedAt: string | null };
+export type RateHistoryEntry = RateChange & { id: string; holdingId: string; voidedAt: string | null };
+export type CloudConfirmationEntry = Confirmation & { id: string; holdingId: string; voidedAt: string | null };
 export type PortfolioData = {
   staleDays: number;
   settings: WealthSettings;
@@ -359,12 +363,15 @@ const tradeRows = (userId: string, holdingId: string | undefined, executor: Exec
     )
     .orderBy(desc(transactions.date), desc(transactions.createdAt));
 
-const actionRows = (userId: string, holdingId: string | undefined, executor: Executor) =>
-  executor
-    .select()
-    .from(corporateActions)
-    .where(and(eq(corporateActions.userId, userId), holdingId ? eq(corporateActions.holdingId, holdingId) : undefined))
-    .orderBy(desc(corporateActions.date), desc(corporateActions.createdAt));
+// Voided corporate actions are left out: they must never reach the engine.
+const actionRows = async (userId: string, holdingId: string | undefined, executor: Executor) =>
+  visibleRows(
+    await executor
+      .select()
+      .from(corporateActions)
+      .where(and(eq(corporateActions.userId, userId), holdingId ? eq(corporateActions.holdingId, holdingId) : undefined))
+      .orderBy(desc(corporateActions.date), desc(corporateActions.createdAt)),
+  );
 
 /**
  * Engine events (posted ledger rows and corporate actions) of one holding, or of all of them. Unordered:
@@ -382,19 +389,20 @@ const toPriceUpdate = (r: typeof priceUpdates.$inferSelect): HoldingPriceUpdate 
   date: r.date,
   price: r.price,
   createdAt: r.createdAt.toISOString(),
+  voidedAt: isoOrNull(r.voidedAt),
 });
 
-/** Newest date first. All of the user's, or one holding's. */
+/** Newest date first. All of the user's, or one holding's. Voided rows are left out. */
 export async function listPriceUpdates(userId: string, holdingId?: string, executor: Executor = db): Promise<HoldingPriceUpdate[]> {
   const rows = await executor
     .select()
     .from(priceUpdates)
     .where(and(eq(priceUpdates.userId, userId), holdingId ? eq(priceUpdates.holdingId, holdingId) : undefined))
     .orderBy(desc(priceUpdates.date), desc(priceUpdates.createdAt));
-  return rows.map(toPriceUpdate);
+  return visibleRows(rows).map(toPriceUpdate);
 }
 
-/** Every price update, oldest first: what the backup needs. */
+/** Every price update, voided ones included, oldest first: what the backup needs. */
 export function listPriceUpdateRows(userId: string) {
   return db
     .select()
@@ -403,7 +411,7 @@ export function listPriceUpdateRows(userId: string) {
     .orderBy(asc(priceUpdates.date), asc(priceUpdates.createdAt));
 }
 
-/** Every corporate action, oldest first: what the backup needs. */
+/** Every corporate action, voided ones included, oldest first: what the backup needs. */
 export function listCorporateActions(userId: string) {
   return db
     .select()
@@ -438,6 +446,7 @@ const toGoldPrice = (r: typeof goldPrices.$inferSelect): GoldPriceEntry => ({
   karat: r.karat as Karat, // gold_prices_karat_check
   price: r.buybackPrice,
   createdAt: r.createdAt.toISOString(),
+  voidedAt: isoOrNull(r.voidedAt),
 });
 
 const toRateChange = (r: typeof rateHistory.$inferSelect): RateHistoryEntry => ({
@@ -446,6 +455,7 @@ const toRateChange = (r: typeof rateHistory.$inferSelect): RateHistoryEntry => (
   date: r.effectiveDate,
   apy: Number(r.apy),
   createdAt: r.createdAt.toISOString(),
+  voidedAt: isoOrNull(r.voidedAt),
 });
 
 const toConfirmation = (r: typeof cloudConfirmations.$inferSelect): CloudConfirmationEntry => ({
@@ -454,6 +464,7 @@ const toConfirmation = (r: typeof cloudConfirmations.$inferSelect): CloudConfirm
   date: r.date,
   value: r.value,
   createdAt: r.createdAt.toISOString(),
+  voidedAt: isoOrNull(r.voidedAt),
 });
 
 /** A deposit or withdrawal: a purchase or sale row of a holding with no quantity (the shape only clouds use). */
@@ -467,17 +478,17 @@ const toCashFlow = (t: TransactionRow): CashFlow => ({
   amount: t.amount,
 });
 
-/** Global buy-back prices per gram, newest first. Pass the transaction handle to read inside a transaction. */
+/** Global buy-back prices per gram, newest first, voided ones left out. Pass the transaction handle to read inside a transaction. */
 export async function listGoldPrices(userId: string, executor: Executor = db): Promise<GoldPriceEntry[]> {
   const rows = await executor
     .select()
     .from(goldPrices)
     .where(eq(goldPrices.userId, userId))
     .orderBy(desc(goldPrices.date), desc(goldPrices.createdAt));
-  return rows.map(toGoldPrice);
+  return visibleRows(rows).map(toGoldPrice);
 }
 
-/** Rate changes, confirmations and cash flows of one cloud, as the engine wants them (posted flows only). */
+/** Rate changes, confirmations and cash flows of one cloud, as the engine wants them (posted flows only, voided records left out). */
 export async function listCloudRecords(userId: string, holdingId: string, executor: Executor = db): Promise<CloudRecords> {
   const rates = await executor
     .select()
@@ -489,8 +500,8 @@ export async function listCloudRecords(userId: string, holdingId: string, execut
     .where(and(eq(cloudConfirmations.userId, userId), eq(cloudConfirmations.holdingId, holdingId)));
   const trades = await tradeRows(userId, holdingId, executor);
   return {
-    rates: rates.map(toRateChange),
-    confirmations: confirmations.map(toConfirmation),
+    rates: visibleRows(rates).map(toRateChange),
+    confirmations: visibleRows(confirmations).map(toConfirmation),
     cashFlows: trades.filter(isCloudFlow).map(toCashFlow),
   };
 }
@@ -516,13 +527,16 @@ export async function listLiabilities(userId: string, options: { includeArchived
   return rows.map(toLiabilityRow);
 }
 
-/** Oldest first. All of the user's, or one liability's. */
-export function listLiabilityUpdates(userId: string, liabilityId?: string, executor: Executor = db): Promise<LiabilityUpdateRow[]> {
-  return executor
+const liabilityUpdateRows = (userId: string, liabilityId: string | undefined, executor: Executor) =>
+  executor
     .select()
     .from(liabilityUpdates)
     .where(and(eq(liabilityUpdates.userId, userId), liabilityId ? eq(liabilityUpdates.liabilityId, liabilityId) : undefined))
     .orderBy(asc(liabilityUpdates.date), asc(liabilityUpdates.createdAt));
+
+/** Oldest first. All of the user's, or one liability's. Voided rows are left out. */
+export async function listLiabilityUpdates(userId: string, liabilityId?: string, executor: Executor = db): Promise<LiabilityUpdateRow[]> {
+  return visibleRows(await liabilityUpdateRows(userId, liabilityId, executor));
 }
 
 /** Every ledger row that carries a liability_id (principal payments and interest expenses), void ones included, newest first. */
@@ -571,11 +585,12 @@ export function listHoldingAllocations(userId: string, holdingId?: string, execu
 
 /**
  * The tables the older list functions do not read, for the backup: children first, then the liabilities they point at.
+ * Voided rows are included on purpose: they stay in the file.
  * Call it before reading holdings, so every rate change and confirmation finds its holding in the file.
  */
 export async function listWealthRows(userId: string) {
   const byTime = <T extends { createdAt: Date }>(a: T, b: T) => a.createdAt.getTime() - b.createdAt.getTime();
-  const liabilityUpdateRows = (await listLiabilityUpdates(userId)).sort(byTime);
+  const updateRows = (await liabilityUpdateRows(userId, undefined, db)).sort(byTime);
   const rateRows = (await db.select().from(rateHistory).where(eq(rateHistory.userId, userId))).sort(byTime);
   const confirmationRows = (await db.select().from(cloudConfirmations).where(eq(cloudConfirmations.userId, userId))).sort(byTime);
   const goldPriceRows = (await db.select().from(goldPrices).where(eq(goldPrices.userId, userId))).sort(byTime);
@@ -585,7 +600,36 @@ export async function listWealthRows(userId: string) {
     rateHistory: rateRows,
     cloudConfirmations: confirmationRows,
     liabilities: liabilityRows,
-    liabilityUpdates: liabilityUpdateRows,
+    liabilityUpdates: updateRows,
+  };
+}
+
+export type RemovedRecords = {
+  priceUpdates: HoldingPriceUpdate[];
+  corporateActions: CorporateActionRow[];
+  goldPrices: GoldPriceEntry[];
+  rateHistory: RateHistoryEntry[];
+  confirmations: CloudConfirmationEntry[];
+  liabilityUpdates: LiabilityUpdateRow[];
+};
+
+/** Only the voided rows of the six correctable record tables, newest first: the "show removed" view. Never feeds a calculation. */
+export async function loadRemovedRecords(userId: string): Promise<RemovedRecords> {
+  const [prices, actions, gold, rates, confirmations, updates] = await Promise.all([
+    db.select().from(priceUpdates).where(and(eq(priceUpdates.userId, userId), isNotNull(priceUpdates.voidedAt))).orderBy(desc(priceUpdates.voidedAt)),
+    db.select().from(corporateActions).where(and(eq(corporateActions.userId, userId), isNotNull(corporateActions.voidedAt))).orderBy(desc(corporateActions.voidedAt)),
+    db.select().from(goldPrices).where(and(eq(goldPrices.userId, userId), isNotNull(goldPrices.voidedAt))).orderBy(desc(goldPrices.voidedAt)),
+    db.select().from(rateHistory).where(and(eq(rateHistory.userId, userId), isNotNull(rateHistory.voidedAt))).orderBy(desc(rateHistory.voidedAt)),
+    db.select().from(cloudConfirmations).where(and(eq(cloudConfirmations.userId, userId), isNotNull(cloudConfirmations.voidedAt))).orderBy(desc(cloudConfirmations.voidedAt)),
+    db.select().from(liabilityUpdates).where(and(eq(liabilityUpdates.userId, userId), isNotNull(liabilityUpdates.voidedAt))).orderBy(desc(liabilityUpdates.voidedAt)),
+  ]);
+  return {
+    priceUpdates: prices.map(toPriceUpdate),
+    corporateActions: actions,
+    goldPrices: gold.map(toGoldPrice),
+    rateHistory: rates.map(toRateChange),
+    confirmations: confirmations.map(toConfirmation),
+    liabilityUpdates: updates,
   };
 }
 
@@ -602,12 +646,14 @@ export async function loadPortfolio(userId: string): Promise<PortfolioData> {
       .select()
       .from(rateHistory)
       .where(eq(rateHistory.userId, userId))
-      .orderBy(desc(rateHistory.effectiveDate), desc(rateHistory.createdAt)),
+      .orderBy(desc(rateHistory.effectiveDate), desc(rateHistory.createdAt))
+      .then(visibleRows),
     db
       .select()
       .from(cloudConfirmations)
       .where(eq(cloudConfirmations.userId, userId))
-      .orderBy(desc(cloudConfirmations.date), desc(cloudConfirmations.createdAt)),
+      .orderBy(desc(cloudConfirmations.date), desc(cloudConfirmations.createdAt))
+      .then(visibleRows),
   ]);
   const events = eventsByHolding(toHoldingEvents(trades, actions));
   const pricesBy = new Map<string, PriceUpdate[]>();
@@ -892,7 +938,7 @@ export type MonthData = {
   range: { start: string; end: string };
   /** Every ledger row dated in the month, any status: the engines count posted rows only. */
   txs: TransactionRow[];
-  /** Manual loan updates dated in the month. */
+  /** Manual loan updates dated in the month (voided ones left out). */
   liabilityUpdates: LiabilityUpdateRow[];
   /** Goal allocation events dated in the month, newest first. */
   allocationEvents: AllocationEventRow[];
@@ -909,7 +955,8 @@ export async function loadMonth(userId: string, range: { start: string; end: str
       .select()
       .from(liabilityUpdates)
       .where(and(eq(liabilityUpdates.userId, userId), gte(liabilityUpdates.date, range.start), lte(liabilityUpdates.date, range.end)))
-      .orderBy(asc(liabilityUpdates.date), asc(liabilityUpdates.createdAt)),
+      .orderBy(asc(liabilityUpdates.date), asc(liabilityUpdates.createdAt))
+      .then(visibleRows),
     listAllocationEvents(userId, { from: range.start, to: range.end }),
     listRecurringTemplates(userId, { activeOnly: true }),
     db
@@ -1451,4 +1498,38 @@ export async function recordPushFailure(userId: string, id: string): Promise<num
 
 export async function deletePushSubscriptionById(userId: string, id: string): Promise<void> {
   await db.delete(pushSubscriptions).where(and(eq(pushSubscriptions.userId, userId), eq(pushSubscriptions.id, id)));
+}
+
+// ---- Phase 8: corrections ----
+
+/**
+ * The rows behind listHoldingEvents, with their ids and voided corporate actions left out. A correction needs the ids to
+ * build the history it would leave behind (every row but the one being corrected, plus its replacement) before writing.
+ */
+export async function listHoldingHistoryRows(userId: string, holdingId: string, executor: Executor = db) {
+  return { trades: await tradeRows(userId, holdingId, executor), actions: await actionRows(userId, holdingId, executor) };
+}
+
+export type CloudEntries = {
+  flows: (CashFlow & { id: string })[];
+  rates: RateHistoryEntry[];
+  confirmations: CloudConfirmationEntry[];
+};
+
+/** listCloudRecords with ids on every record, for the same reason: a correction builds the proposed records before writing. */
+export async function listCloudEntries(userId: string, holdingId: string, executor: Executor = db): Promise<CloudEntries> {
+  const rates = await executor
+    .select()
+    .from(rateHistory)
+    .where(and(eq(rateHistory.userId, userId), eq(rateHistory.holdingId, holdingId)));
+  const confirmations = await executor
+    .select()
+    .from(cloudConfirmations)
+    .where(and(eq(cloudConfirmations.userId, userId), eq(cloudConfirmations.holdingId, holdingId)));
+  const trades = await tradeRows(userId, holdingId, executor);
+  return {
+    rates: visibleRows(rates).map(toRateChange),
+    confirmations: visibleRows(confirmations).map(toConfirmation),
+    flows: trades.filter(isCloudFlow).map((t) => ({ id: t.id, ...toCashFlow(t) })),
+  };
 }

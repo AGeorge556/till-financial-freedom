@@ -6,15 +6,19 @@ import {
   addLiabilityUpdate,
   archiveLiability,
   createLiability,
+  editLiabilityUpdate,
+  editPayment,
   recordPayment,
+  removeLiabilityUpdate,
   unarchiveLiability,
   updateLiability,
   voidPayment,
 } from "@/app/actions/liabilities";
 import { parseEGP } from "@/lib/finance-core/money";
 import { Amount } from "./Amount";
+import { RemoveButton } from "./Correct";
 import { Form } from "./Form";
-import { ratePercentText } from "./GoalFormat";
+import { egpText, ratePercentText } from "./GoalFormat";
 import { decimalInput, Saved } from "./HoldingForms";
 import type { AccountOption, CategoryOption } from "./TransactionForm";
 import { Field, field, primaryBtn, secondaryBtn } from "./ui";
@@ -73,35 +77,58 @@ export function AddLoanForm({ today }: { today: string }) {
   );
 }
 
-/** One payment: the principal reduces the loan (not spending), the interest is an expense. Both are written together. */
+export type PaymentEditing = {
+  /** Either ledger row of the payment. */
+  id: string;
+  principal: number;
+  interest: number;
+  categoryId: string | null;
+  accountId: string | null;
+  date: string;
+  note: string | null;
+  what: string;
+};
+
+/**
+ * One payment: the principal reduces the loan (not spending), the interest is an expense. Both are written together.
+ * With `editing` it corrects that payment: both rows are replaced as one.
+ */
 export function PaymentForm({
   liabilityId,
-  accounts,
+  accounts: allAccounts,
   categories,
   today,
+  editing,
+  onDone,
 }: {
   liabilityId: string;
   accounts: AccountOption[];
   categories: CategoryOption[];
   today: string;
+  editing?: PaymentEditing;
+  onDone?: () => void;
 }) {
-  const [principal, setPrincipal] = useState("");
-  const [interest, setInterest] = useState("");
+  const [principal, setPrincipal] = useState(editing ? egpText(editing.principal) : "");
+  const [interest, setInterest] = useState(editing && editing.interest > 0 ? egpText(editing.interest) : "");
   const p = parseEGP(principal);
   const i = interest.trim() === "" ? 0 : parseEGP(interest);
-  const expense = categories.filter((c) => c.kind === "expense" && !c.archived);
+  const expense = categories.filter((c) => c.kind === "expense" && (!c.archived || c.id === editing?.categoryId));
+  const accounts = allAccounts.filter((a) => !a.archived || a.id === editing?.accountId);
 
   return (
+    <>
     <Form
-      action={recordPayment}
-      reset
+      action={editing ? editPayment : recordPayment}
+      reset={!editing}
       onSuccess={() => {
+        if (editing) return onDone?.();
         setPrincipal("");
         setInterest("");
       }}
     >
       {({ pending, saved }) => (
         <>
+          {editing && <input type="hidden" name="id" value={editing.id} />}
           <input type="hidden" name="liabilityId" value={liabilityId} />
           <p className="mb-4 text-sm text-muted">
             The principal reduces the loan and is not spending. The interest is spending.
@@ -147,7 +174,7 @@ export function PaymentForm({
                   .
                 </p>
               ) : (
-                <select name="categoryId" required defaultValue={expense[0].id} className={field}>
+                <select name="categoryId" required defaultValue={expense.find((c) => c.id === editing?.categoryId)?.id ?? expense[0].id} className={field}>
                   {expense.map((c) => (
                     <option key={c.id} value={c.id}>
                       {c.name}
@@ -158,7 +185,7 @@ export function PaymentForm({
             </Field>
           )}
           <Field label="Paid from" className="mt-4">
-            <select name="accountId" required className={field}>
+            <select name="accountId" required defaultValue={editing?.accountId ?? undefined} className={field}>
               {accounts.map((a) => (
                 <option key={a.id} value={a.id}>
                   {a.name}
@@ -167,60 +194,88 @@ export function PaymentForm({
             </select>
           </Field>
           <Field label="Date" className="mt-4">
-            <input type="date" name="date" required defaultValue={today} className={field} />
+            <input type="date" name="date" required defaultValue={editing?.date ?? today} className={field} />
           </Field>
           <Field label="Note (optional, no amounts)" className="mt-4">
-            <input name="note" autoComplete="off" maxLength={500} className={field} />
+            <input name="note" autoComplete="off" maxLength={500} defaultValue={editing?.note ?? ""} className={field} />
           </Field>
           <button type="submit" disabled={pending} className={`mt-6 ${primaryBtn}`}>
-            {pending ? "Saving…" : "Record payment"}
+            {pending ? "Saving…" : editing ? "Save" : "Record payment"}
           </button>
-          <Saved show={saved}>Payment recorded.</Saved>
+          {!editing && <Saved show={saved}>Payment recorded.</Saved>}
         </>
       )}
     </Form>
+    {editing && (
+      <RemoveButton action={voidPayment} id={editing.id} noun="payment (interest included)" what={editing.what} onDone={onDone} />
+    )}
+    </>
   );
 }
 
-/** Borrowed more, or a correction: moves no cash. */
-export function LiabilityUpdateForm({ liabilityId, today }: { liabilityId: string; today: string }) {
+export type UpdateEditing = { id: string; delta: number; date: string; note: string | null; what: string };
+
+/** Borrowed more, or a correction: moves no cash. With `editing` it corrects a saved one. */
+export function LiabilityUpdateForm({
+  liabilityId,
+  today,
+  editing,
+  onDone,
+}: {
+  liabilityId: string;
+  today: string;
+  editing?: UpdateEditing;
+  onDone?: () => void;
+}) {
   return (
-    <Form action={addLiabilityUpdate} reset>
+    <>
+    <Form action={editing ? editLiabilityUpdate : addLiabilityUpdate} reset={!editing} onSuccess={onDone}>
       {({ pending, saved }) => (
         <>
+          {editing && <input type="hidden" name="id" value={editing.id} />}
           <input type="hidden" name="liabilityId" value={liabilityId} />
           <Field label="What changed">
-            <select name="direction" defaultValue="more" className={field}>
+            <select name="direction" defaultValue={editing && editing.delta < 0 ? "less" : "more"} className={field}>
               <option value="more">I owe more (borrowed more)</option>
               <option value="less">I owe less (a correction)</option>
             </select>
           </Field>
           <Field label="By how much (EGP)" className="mt-4">
-            <input name="amount" {...decimalInput} required placeholder="0" className={field} />
+            <input
+              name="amount"
+              {...decimalInput}
+              required
+              placeholder="0"
+              defaultValue={editing ? egpText(Math.abs(editing.delta)) : undefined}
+              className={field}
+            />
           </Field>
           <p className="mt-2 text-sm text-muted">This moves no cash and touches no account. If you paid something, use Record a payment.</p>
           <Field label="Date" className="mt-4">
-            <input type="date" name="date" required defaultValue={today} className={field} />
+            <input type="date" name="date" required defaultValue={editing?.date ?? today} className={field} />
           </Field>
           <Field label="Note (optional, no amounts)" className="mt-4">
-            <input name="note" autoComplete="off" maxLength={500} className={field} />
+            <input name="note" autoComplete="off" maxLength={500} defaultValue={editing?.note ?? ""} className={field} />
           </Field>
           <button type="submit" disabled={pending} className={`mt-6 ${primaryBtn}`}>
-            {pending ? "Saving…" : "Save update"}
+            {pending ? "Saving…" : editing ? "Save" : "Save update"}
           </button>
-          <Saved show={saved}>Update saved.</Saved>
+          {!editing && <Saved show={saved}>Update saved.</Saved>}
         </>
       )}
     </Form>
+    {editing && <RemoveButton action={removeLiabilityUpdate} id={editing.id} noun="update" what={editing.what} onDone={onDone} />}
+    </>
   );
 }
 
-/** Name, type, rate, start date and notes. What you owe changes only through payments and updates. */
+/** Name, type, rate, what you owed at the start, start date and notes. What you owe now also moves with payments and updates. */
 export function EditLoanForm({
   id,
   name,
   kind,
   interestRate,
+  openingBalance,
   startDate,
   notes,
 }: {
@@ -228,6 +283,7 @@ export function EditLoanForm({
   name: string;
   kind: Kind;
   interestRate: number | null;
+  openingBalance: number;
   startDate: string;
   notes: string | null;
 }) {
@@ -243,6 +299,12 @@ export function EditLoanForm({
           <Field label="Yearly interest rate in % (optional)" className="mt-4">
             <input name="interestRate" {...decimalInput} placeholder="Not set" defaultValue={ratePercentText(interestRate)} className={field} />
           </Field>
+          <Field label="What you owed at the start (EGP)" className="mt-4">
+            <input name="openingBalance" {...decimalInput} required defaultValue={egpText(openingBalance)} className={field} />
+          </Field>
+          <p className="mt-1 text-sm text-muted">
+            Changing this changes what you owe now by the same amount. It is refused if the balance would go below zero on any date.
+          </p>
           <Field label="Start date" className="mt-4">
             <input type="date" name="startDate" required defaultValue={startDate} className={field} />
           </Field>
@@ -268,22 +330,6 @@ export function LiabilityArchiveButton({ id, archived, canArchive }: { id: strin
           <input type="hidden" name="id" value={id} />
           <button type="submit" disabled={pending || (!archived && !canArchive)} className={`w-full ${secondaryBtn}`}>
             {pending ? "Saving…" : archived ? "Restore loan" : "Archive loan"}
-          </button>
-        </>
-      )}
-    </Form>
-  );
-}
-
-export function LiabilityVoidButton({ id, what }: { id: string; what: string }) {
-  return (
-    <Form action={voidPayment} confirm="Void this payment? It stays in your history but stops counting. The principal and the interest are both voided, and your cash balance is corrected.">
-      {({ pending }) => (
-        <>
-          <input type="hidden" name="id" value={id} />
-          <button type="submit" disabled={pending} className="min-h-11 rounded-xl px-3 text-sm font-medium text-negative disabled:opacity-60">
-            {pending ? "Voiding…" : "Void"}
-            <span className="sr-only"> {what}</span>
           </button>
         </>
       )}

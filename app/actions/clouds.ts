@@ -1,11 +1,12 @@
 "use server";
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { db } from "@/db";
-import { type CloudRecords, listCloudRecords } from "@/db/queries";
+import { type CloudRecords, listCloudEntries, listCloudRecords } from "@/db/queries";
 import { accounts, cloudConfirmations, contributionFrequency, holdings, rateHistory, transactions } from "@/db/schema";
 import { requireUserId } from "@/lib/auth";
+import { proposedCloudRecords, replacementStamp } from "@/lib/corrections";
 import { cloudEstimate, validateCloudHistory, validateWithdrawal } from "@/lib/finance-core/clouds";
 import { parseEGP, type Piasters } from "@/lib/finance-core/money";
 import { cairoToday } from "@/lib/finance-core/time";
@@ -20,6 +21,7 @@ const FUTURE_ERROR = "A cloud record cannot be dated in the future.";
 const NOTE_ERROR = "Note is too long (500 characters at most).";
 const APY_ERROR = "Enter the APY as a percent above -100 and up to 1000, like 20 or 7.5.";
 const HISTORY_ERROR = "That would leave a withdrawal larger than the cloud's estimated value at the time.";
+const RECORD_NOT_FOUND = "Record not found or already removed.";
 const MAX_NOTE = 500;
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -86,15 +88,15 @@ async function mutate(
   return {};
 }
 
-/** The cash account must be the signed-in user's own and still active. */
-async function requireAccount(tx: Tx, userId: string, accountId: string | null): Promise<string> {
+/** The cash account must be the signed-in user's own and still active (an edit may keep the archived one it already has). */
+async function requireAccount(tx: Tx, userId: string, accountId: string | null, keepId?: string | null): Promise<string> {
   const [account] = accountId
     ? await tx
         .select({ id: accounts.id, archivedAt: accounts.archivedAt })
         .from(accounts)
         .where(and(eq(accounts.id, accountId), eq(accounts.userId, userId)))
     : [];
-  return account && !account.archivedAt ? account.id : refuse(ACCOUNT_ERROR);
+  return account && (!account.archivedAt || account.id === keepId) ? account.id : refuse(ACCOUNT_ERROR);
 }
 
 type Flow = { amount: Piasters; date: string; note: string | null; accountId: string | null };
@@ -170,7 +172,7 @@ export async function withdrawFromCloud(_prev: ActionState, formData: FormData):
   });
 }
 
-/** Appends an APY (effective annual rate, typed as a percent) from an effective date. Never edits one. */
+/** Appends an APY (effective annual rate, typed as a percent) from an effective date. A wrong one is fixed with editRateChange. */
 export async function addRateChange(_prev: ActionState, formData: FormData): Promise<ActionState> {
   const userId = await requireUserId();
   const apy = apyToRate(str(formData, "apy"));
@@ -232,4 +234,172 @@ export async function updateCloud(_prev: ActionState, formData: FormData): Promi
       })
       .where(and(eq(holdings.id, holding.id), eq(holdings.userId, userId)));
   });
+}
+
+// ---- Corrections: a record is voided, and an edit inserts its replacement in the same transaction ----
+// Every one rebuilds the cloud's whole proposed records and validates them before it writes anything.
+
+/** Edit (replace = true) or void (false) a deposit or withdrawal. Its type, deposit or withdrawal, cannot change. */
+async function correctFlow(formData: FormData, replace: boolean): Promise<ActionState> {
+  const userId = await requireUserId();
+  const flowId = id(formData, "id");
+  const flow = replace ? readFlow(formData) : null;
+  if (typeof flow === "string") return { error: flow };
+  const [parent] = flowId
+    ? await db
+        .select({ holdingId: transactions.holdingId })
+        .from(transactions)
+        .where(and(eq(transactions.id, flowId), eq(transactions.userId, userId)))
+    : [];
+  if (!flowId || !parent?.holdingId) return { error: RECORD_NOT_FOUND };
+
+  return mutate(userId, parent.holdingId, async (tx, holding) => {
+    const [old] = await tx
+      .select()
+      .from(transactions)
+      .where(
+        and(
+          eq(transactions.id, flowId),
+          eq(transactions.userId, userId),
+          eq(transactions.holdingId, holding.id),
+          eq(transactions.status, "posted"),
+          isNull(transactions.quantity), // a unit trade is not a cloud flow
+          inArray(transactions.type, ["INVESTMENT_PURCHASE", "INVESTMENT_SALE"]),
+        ),
+      )
+      .for("update");
+    if (!old) return refuse(RECORD_NOT_FOUND);
+    const deposit = old.type === "INVESTMENT_PURCHASE";
+    const accountId = flow ? await requireAccount(tx, userId, flow.accountId, old.fromAccountId ?? old.toAccountId) : null;
+    const createdAt = flow ? replacementStamp(old, flow.date) : null;
+    assertHistory(
+      proposedCloudRecords(await listCloudEntries(userId, holding.id, tx), {
+        dropFlow: old.id,
+        addFlow:
+          flow && createdAt
+            ? { date: flow.date, createdAt: createdAt.toISOString(), kind: deposit ? "deposit" : "withdrawal", amount: flow.amount }
+            : undefined,
+      }),
+    );
+    await tx.update(transactions).set({ status: "void", voidedAt: new Date() }).where(eq(transactions.id, old.id));
+    if (flow && createdAt && accountId) {
+      await tx.insert(transactions).values({
+        userId,
+        type: old.type,
+        date: flow.date,
+        amount: flow.amount,
+        fromAccountId: deposit ? accountId : null,
+        toAccountId: deposit ? null : accountId,
+        holdingId: holding.id,
+        note: flow.note,
+        replacesId: old.id,
+        createdAt,
+      });
+    }
+  });
+}
+
+export async function editCloudFlow(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  return correctFlow(formData, true);
+}
+
+/** Voids a deposit or withdrawal; refused if a later withdrawal would then be larger than the estimated value. */
+export async function voidCloudFlow(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  return correctFlow(formData, false);
+}
+
+/** Edit (replace = true) or remove (false) an APY change. */
+async function correctRate(formData: FormData, replace: boolean): Promise<ActionState> {
+  const userId = await requireUserId();
+  const rowId = id(formData, "id");
+  const apy = replace ? apyToRate(str(formData, "apy")) : null;
+  if (replace && apy === null) return { error: APY_ERROR };
+  const effectiveDate = replace ? str(formData, "effectiveDate") || cairoToday() : "";
+  if (replace && !isRealDate(effectiveDate)) return { error: DATE_ERROR };
+  const [parent] = rowId
+    ? await db
+        .select({ holdingId: rateHistory.holdingId })
+        .from(rateHistory)
+        .where(and(eq(rateHistory.id, rowId), eq(rateHistory.userId, userId)))
+    : [];
+  if (!rowId || !parent) return { error: RECORD_NOT_FOUND };
+
+  return mutate(userId, parent.holdingId, async (tx, holding) => {
+    const [old] = await tx
+      .select()
+      .from(rateHistory)
+      .where(
+        and(eq(rateHistory.id, rowId), eq(rateHistory.userId, userId), eq(rateHistory.holdingId, holding.id), isNull(rateHistory.voidedAt)),
+      )
+      .for("update");
+    if (!old) return refuse(RECORD_NOT_FOUND);
+    const createdAt = replacementStamp({ date: old.effectiveDate, createdAt: old.createdAt }, effectiveDate);
+    assertHistory(
+      proposedCloudRecords(await listCloudEntries(userId, holding.id, tx), {
+        dropRate: old.id,
+        addRate: apy === null ? undefined : { date: effectiveDate, createdAt: createdAt.toISOString(), apy: Number(apy) },
+      }),
+    );
+    await tx.update(rateHistory).set({ voidedAt: new Date() }).where(eq(rateHistory.id, old.id));
+    if (apy !== null) await tx.insert(rateHistory).values({ userId, holdingId: holding.id, effectiveDate, apy, createdAt });
+  });
+}
+
+export async function editRateChange(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  return correctRate(formData, true);
+}
+
+export async function removeRateChange(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  return correctRate(formData, false);
+}
+
+/** Edit (replace = true) or remove (false) a confirmed value. */
+async function correctConfirmation(formData: FormData, replace: boolean): Promise<ActionState> {
+  const userId = await requireUserId();
+  const rowId = id(formData, "id");
+  const value = replace ? parseEGP(str(formData, "value")) : null;
+  if (replace && value === null) return { error: "Enter the value like 1,250.50, or 0 if nothing is left." };
+  const date = replace ? str(formData, "date") || cairoToday() : "";
+  if (replace && !isRealDate(date)) return { error: DATE_ERROR };
+  if (replace && date > cairoToday()) return { error: FUTURE_ERROR };
+  const [parent] = rowId
+    ? await db
+        .select({ holdingId: cloudConfirmations.holdingId })
+        .from(cloudConfirmations)
+        .where(and(eq(cloudConfirmations.id, rowId), eq(cloudConfirmations.userId, userId)))
+    : [];
+  if (!rowId || !parent) return { error: RECORD_NOT_FOUND };
+
+  return mutate(userId, parent.holdingId, async (tx, holding) => {
+    const [old] = await tx
+      .select()
+      .from(cloudConfirmations)
+      .where(
+        and(
+          eq(cloudConfirmations.id, rowId),
+          eq(cloudConfirmations.userId, userId),
+          eq(cloudConfirmations.holdingId, holding.id),
+          isNull(cloudConfirmations.voidedAt),
+        ),
+      )
+      .for("update");
+    if (!old) return refuse(RECORD_NOT_FOUND);
+    const createdAt = replacementStamp(old, date);
+    assertHistory(
+      proposedCloudRecords(await listCloudEntries(userId, holding.id, tx), {
+        dropConfirmation: old.id,
+        addConfirmation: value === null ? undefined : { date, createdAt: createdAt.toISOString(), value },
+      }),
+    );
+    await tx.update(cloudConfirmations).set({ voidedAt: new Date() }).where(eq(cloudConfirmations.id, old.id));
+    if (value !== null) await tx.insert(cloudConfirmations).values({ userId, holdingId: holding.id, date, value, createdAt });
+  });
+}
+
+export async function editCloudConfirmation(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  return correctConfirmation(formData, true);
+}
+
+export async function removeCloudConfirmation(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  return correctConfirmation(formData, false);
 }

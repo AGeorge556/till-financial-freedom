@@ -3,8 +3,8 @@ import Link from "next/link";
 import { Amount } from "@/components/Amount";
 import { CloudList } from "@/components/CloudList";
 import { EmptyState } from "@/components/EmptyState";
-import { GoldPriceForm } from "@/components/GoldForms";
-import { GoldPriceHistory, GoldPrices } from "@/components/GoldPrices";
+import { GoldPriceForm, GoldPriceHistory } from "@/components/GoldForms";
+import { GoldPrices } from "@/components/GoldPrices";
 import { AddHoldingForm } from "@/components/HoldingForms";
 import { HoldingList } from "@/components/HoldingList";
 import { HoldingPL } from "@/components/HoldingPL";
@@ -14,7 +14,7 @@ import { Wide } from "@/components/Wide";
 import { MixChart } from "@/components/charts/MixChart";
 import { MixTargets } from "@/components/charts/MixTargets";
 import { ratePercentText } from "@/components/GoalFormat";
-import { accountBalances, classValues, getPortfolioTargets, listAccounts, listTransactions } from "@/db/queries";
+import { accountBalances, classValues, getPortfolioTargets, listAccounts, listTransactions, loadRemovedRecords } from "@/db/queries";
 import { requireUserId } from "@/lib/auth";
 import { mix, MIX_CLASSES, type MixClass, vsTarget } from "@/lib/finance-core/portfolioMix";
 import { cairoToday } from "@/lib/finance-core/time";
@@ -34,11 +34,12 @@ function SectionHead({ title, total }: { title: string; total: number }) {
 export default async function Page() {
   const userId = await requireUserId();
   const today = cairoToday();
-  const [inv, accounts, txRows, targets] = await Promise.all([
+  const [inv, accounts, txRows, targets, removed] = await Promise.all([
     loadInvestments(userId, today),
     listAccounts(userId, { includeArchived: true }),
     listTransactions(userId),
     getPortfolioTargets(userId),
+    loadRemovedRecords(userId),
   ]);
   const { settings } = inv.portfolio;
   const current = mix(classValues(inv.wealth, accounts, accountBalances(accounts, txRows)).values);
@@ -179,7 +180,7 @@ export default async function Page() {
                 <GoldPriceForm mode={settings.goldPriceMode} today={today} />
               </Panel>
             </div>
-            <GoldPriceHistory prices={inv.portfolio.goldPrices} />
+            <GoldPriceHistory prices={inv.portfolio.goldPrices} removed={removed.goldPrices} mode={settings.goldPriceMode} today={today} />
           </section>
 
           <section className="mt-8">

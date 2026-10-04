@@ -11,7 +11,7 @@ import { KARATS } from "@/lib/finance-core/gold";
 import { parseEGP } from "@/lib/finance-core/money";
 import { replayHolding } from "@/lib/finance-core/portfolio";
 import { cairoToday } from "@/lib/finance-core/time";
-import { type ActionState, id, isRealDate, NAME_ERROR, str, validName } from "./shared";
+import { type ActionState, id, isRealDate, knownViolation, NAME_ERROR, str, validName } from "./shared";
 
 const NOT_FOUND = "Holding not found.";
 const MAX_TICKER = 20;
@@ -26,11 +26,6 @@ const KNOWN_VIOLATIONS: Record<string, string> = {
   holdings_cloud_values_check: "Check the maturity date and the contribution.",
 };
 
-function knownViolation(e: unknown): string | undefined {
-  const name = (e as { cause?: { constraint_name?: string } })?.cause?.constraint_name;
-  return name ? KNOWN_VIOLATIONS[name] : undefined;
-}
-
 type Specific = Pick<
   typeof holdings.$inferInsert,
   "karat" | "form" | "startDate" | "maturityDate" | "contributionAmount" | "contributionFrequency"
@@ -44,7 +39,7 @@ const NO_SPECIFIC: Specific = {
   contributionFrequency: null,
 };
 
-/** Gold: karat and form. A karat cannot change after purchases, so these are only read at creation. */
+/** Gold: karat and form. Changing the karat revalues the gold (its buy-back price follows the karat); nothing else depends on it. */
 function parseGold(formData: FormData): Specific | string {
   const karatText = str(formData, "karat");
   const form = str(formData, "form") as (typeof goldForm.enumValues)[number];
@@ -81,7 +76,7 @@ function parseCloud(formData: FormData): Specific | string {
   };
 }
 
-/** Name, ticker and notes: the only fields a holding lets you change. */
+/** Name, ticker and notes: what every kind of holding lets you change. */
 function parseText(formData: FormData) {
   const name = str(formData, "name");
   const ticker = str(formData, "ticker");
@@ -123,7 +118,7 @@ export async function createHolding(_prev: ActionState, formData: FormData): Pro
       await tx.insert(holdings).values({ userId, accountId: account.id, kind, ...text, ...specific });
     });
   } catch (e) {
-    const message = knownViolation(e);
+    const message = knownViolation(e, KNOWN_VIOLATIONS);
     if (!message) throw e;
     return { error: message };
   }
@@ -132,6 +127,11 @@ export async function createHolding(_prev: ActionState, formData: FormData): Pro
   return {};
 }
 
+/**
+ * Name, ticker and notes, and the details fixed at creation: gold's karat and form, a Savings Cloud's start and maturity
+ * dates and contribution. Those are read when the form sends them (karat or form; any cloud field), so a name-only edit
+ * leaves them alone.
+ */
 export async function updateHolding(_prev: ActionState, formData: FormData): Promise<ActionState> {
   const userId = await requireUserId();
   const holdingId = id(formData, "id");
@@ -139,12 +139,30 @@ export async function updateHolding(_prev: ActionState, formData: FormData): Pro
   const text = parseText(formData);
   if (typeof text === "string") return { error: text };
 
-  const updated = await db
-    .update(holdings)
-    .set({ ...text, updatedAt: new Date() })
-    .where(and(eq(holdings.id, holdingId), eq(holdings.userId, userId)))
-    .returning({ id: holdings.id });
-  if (updated.length === 0) return { error: NOT_FOUND };
+  let error: string | undefined;
+  try {
+    error = await db.transaction(async (tx) => {
+      const [holding] = await tx
+        .select()
+        .from(holdings)
+        .where(and(eq(holdings.id, holdingId), eq(holdings.userId, userId)))
+        .for("update");
+      if (!holding) return NOT_FOUND;
+      const sendsGold = formData.has("karat") || formData.has("form");
+      const sendsCloud = ["startDate", "maturityDate", "contributionAmount", "contributionFrequency"].some((k) => formData.has(k));
+      const specific = holding.kind === "gold" && sendsGold ? parseGold(formData) : holding.kind === "cloud" && sendsCloud ? parseCloud(formData) : {};
+      if (typeof specific === "string") return specific;
+      await tx
+        .update(holdings)
+        .set({ ...text, ...specific, updatedAt: new Date() })
+        .where(eq(holdings.id, holding.id));
+    });
+  } catch (e) {
+    const message = knownViolation(e, KNOWN_VIOLATIONS);
+    if (!message) throw e;
+    return { error: message };
+  }
+  if (error) return { error };
   revalidatePath("/", "layout");
   return {};
 }

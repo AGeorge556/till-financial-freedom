@@ -7,8 +7,10 @@ import { accounts, categories, transactions } from "@/db/schema";
 import { requireUserId } from "@/lib/auth";
 import { parseEGP } from "@/lib/finance-core/money";
 import { cairoToday } from "@/lib/finance-core/time";
-import { voidInvestmentTransaction } from "./investments";
-import { voidPayment } from "./liabilities";
+import { editAdjustment, voidAdjustment } from "./accounts";
+import { editCloudFlow, voidCloudFlow } from "./clouds";
+import { editInvestmentTransaction, voidInvestmentTransaction } from "./investments";
+import { editPayment, voidPayment } from "./liabilities";
 import { type ActionState, id, isRealDate, str } from "./shared";
 
 const NOT_FOUND = "Transaction not found.";
@@ -26,6 +28,21 @@ type Fields = {
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 const isKind = (type: string): type is Kind => type === "EXPENSE" || type === "INCOME" || type === "TRANSFER";
+
+/**
+ * Which action owns a row. Investment, cloud, loan and balance-adjustment rows each have their own validation (the
+ * position, the cloud's value, the loan balance, the goals' earmarks), so no path here may change one directly.
+ * A cloud flow is the holding row with no quantity (a dividend has none either, but it is not a purchase or sale).
+ */
+async function ownerOf(userId: string, txId: string) {
+  const [row] = await db
+    .select({ type: transactions.type, holdingId: transactions.holdingId, liabilityId: transactions.liabilityId, quantity: transactions.quantity })
+    .from(transactions)
+    .where(and(eq(transactions.id, txId), eq(transactions.userId, userId)));
+  if (row?.holdingId) return row.quantity === null && row.type !== "DIVIDEND" ? "cloud" : "investment";
+  if (row?.liabilityId) return "payment";
+  return row?.type === "ADJUSTMENT" ? "adjustment" : "ordinary";
+}
 
 /** Shape and format checks only; ownership is checked against the database by checkRefs. */
 function parseFields(type: Kind, formData: FormData): Fields | string {
@@ -111,6 +128,16 @@ export async function editTransaction(_prev: ActionState, formData: FormData): P
   const userId = await requireUserId();
   const txId = id(formData, "id");
   if (!txId) return { error: NOT_FOUND };
+  switch (await ownerOf(userId, txId)) {
+    case "cloud":
+      return editCloudFlow(_prev, formData);
+    case "investment":
+      return editInvestmentTransaction(_prev, formData);
+    case "payment":
+      return editPayment(_prev, formData);
+    case "adjustment":
+      return editAdjustment(_prev, formData);
+  }
 
   const error = await db.transaction(async (tx) => {
     // FOR UPDATE: a concurrent edit of the same row waits, then sees status 'void' and is refused.
@@ -120,11 +147,7 @@ export async function editTransaction(_prev: ActionState, formData: FormData): P
       .where(and(eq(transactions.id, txId), eq(transactions.userId, userId)))
       .for("update");
     if (!old) return NOT_FOUND;
-    if (old.holdingId) {
-      return "Buys, sells, dividends, deposits and withdrawals cannot be edited. Void it and enter the corrected one from the holding.";
-    }
-    if (old.liabilityId) return "A loan payment cannot be edited. Void it and enter the corrected one from the loan.";
-    if (!isKind(old.type) || old.status === "void") return "This transaction cannot be edited.";
+    if (old.holdingId || old.liabilityId || !isKind(old.type) || old.status === "void") return "This transaction cannot be edited.";
 
     const fields = parseFields(old.type, formData);
     if (typeof fields === "string") return fields;
@@ -156,14 +179,18 @@ export async function voidTransaction(_prev: ActionState, formData: FormData): P
   const txId = id(formData, "id");
   if (!txId) return { error: NOT_FOUND };
 
-  // A holding's rows must pass the position check (rule F), a cloud's the value check, and a loan payment's two
-  // rows (principal and interest) are voided together, before anything is voided.
-  const [row] = await db
-    .select({ holdingId: transactions.holdingId, liabilityId: transactions.liabilityId })
-    .from(transactions)
-    .where(and(eq(transactions.id, txId), eq(transactions.userId, userId)));
-  if (row?.holdingId) return voidInvestmentTransaction(_prev, formData);
-  if (row?.liabilityId) return voidPayment(_prev, formData);
+  // A holding's rows must pass the position check (rule F), a cloud's the value check, a loan payment's two rows
+  // (principal and interest) are voided together, and an adjustment must leave the goals' earmarks within the balance.
+  switch (await ownerOf(userId, txId)) {
+    case "cloud":
+      return voidCloudFlow(_prev, formData);
+    case "investment":
+      return voidInvestmentTransaction(_prev, formData);
+    case "payment":
+      return voidPayment(_prev, formData);
+    case "adjustment":
+      return voidAdjustment(_prev, formData);
+  }
 
   // A recurring row keeps its (template, due date) when voided, so voiding it (or skipping a pending one) is final:
   // it is never generated again. Enter a corrected one by hand if it should count.
