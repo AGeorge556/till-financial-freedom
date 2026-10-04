@@ -7,6 +7,7 @@ const percentOf = (status: BudgetStatus) => Math.round(status.percentUsed * 100)
 /** Text, symbol and colour together; never colour alone. */
 function state(status: BudgetStatus, ongoing: boolean): { text: string; tone: string; bar: string } {
   if (status.level === "over") return { text: "▲ Over budget", tone: "text-negative", bar: "bg-negative" };
+  if (status.level === "alert") return { text: `▲ ${percentOf(status)}% used, at your alert level`, tone: "text-negative", bar: "bg-negative" };
   if (status.level === "warn") return { text: `▲ ${percentOf(status)}% of your budget used`, tone: "text-spending", bar: "bg-spending" };
   if (ongoing && status.projectedOver) return { text: "▲ On track to go over", tone: "text-spending", bar: "bg-positive" };
   return { text: "✓ Within budget", tone: "text-positive", bar: "bg-positive" };

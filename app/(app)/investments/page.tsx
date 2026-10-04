@@ -10,8 +10,12 @@ import { HoldingList } from "@/components/HoldingList";
 import { HoldingPL } from "@/components/HoldingPL";
 import { Panel } from "@/components/HoldingParts";
 import { card } from "@/components/ui";
-import { listAccounts } from "@/db/queries";
+import { MixChart } from "@/components/charts/MixChart";
+import { MixTargets } from "@/components/charts/MixTargets";
+import { ratePercentText } from "@/components/GoalFormat";
+import { accountBalances, classValues, getPortfolioTargets, listAccounts, listTransactions } from "@/db/queries";
 import { requireUserId } from "@/lib/auth";
+import { mix, MIX_CLASSES, type MixClass, vsTarget } from "@/lib/finance-core/portfolioMix";
 import { cairoToday } from "@/lib/finance-core/time";
 import { loadInvestments } from "./data";
 
@@ -29,8 +33,15 @@ function SectionHead({ title, total }: { title: string; total: number }) {
 export default async function Page() {
   const userId = await requireUserId();
   const today = cairoToday();
-  const [inv, accounts] = await Promise.all([loadInvestments(userId, today), listAccounts(userId, { includeArchived: true })]);
+  const [inv, accounts, txRows, targets] = await Promise.all([
+    loadInvestments(userId, today),
+    listAccounts(userId, { includeArchived: true }),
+    listTransactions(userId),
+    getPortfolioTargets(userId),
+  ]);
   const { settings } = inv.portfolio;
+  const current = mix(classValues(inv.wealth, accounts, accountBalances(accounts, txRows)).values);
+  const targetText = Object.fromEntries(MIX_CLASSES.map((c) => [c, targets ? ratePercentText(targets[c]) : ""])) as Record<MixClass, string>;
   const active = inv.views.filter((v) => !v.row.archivedAt);
   const stocks = active.filter((v) => v.row.kind !== "gold");
   const gold = active.filter((v) => v.row.kind === "gold");
@@ -114,6 +125,22 @@ export default async function Page() {
               Cost basis method: average cost. Prices are the ones you typed in, so they can be out of date. Cloud growth is
               market change, not income.
             </p>
+          </section>
+
+          <section className="mt-8">
+            <h2 className="mb-2 text-lg font-semibold tracking-tight">Portfolio allocation</h2>
+            <div className={`p-5 ${card}`}>
+              <p className="mb-4 text-sm text-muted">
+                Your mix across stocks and funds, gold, Savings Clouds and cash, as a share of everything you own.
+              </p>
+              <MixChart mix={current} />
+              <div className="mt-5 border-t border-border pt-4">
+                <MixTargets
+                  lines={targets ? vsTarget(current, targets) : null}
+                  values={targetText}
+                />
+              </div>
+            </div>
           </section>
 
           <section className="mt-8">

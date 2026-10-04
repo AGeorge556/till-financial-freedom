@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { type Tx, accountBalance, netWorth, periodSummary } from "./ledger";
-import { liabilityAdjustments, outstanding, totalLiabilities, validatePayment } from "./liabilities";
+import { liabilityAdjustments, outstanding, totalLiabilities, validateLiabilityHistory, validatePayment } from "./liabilities";
 import { egpToPiasters as egp } from "./money";
 
 const upd = (date: string, deltaEgp: number) => ({ date, delta: egp(deltaEgp) });
@@ -84,5 +84,41 @@ describe("a manual liability update", () => {
     [[], 0],
   ])("liabilityAdjustments %j -> %i", (updates, expected) => {
     expect(liabilityAdjustments(updates, { start: "2026-03-01", end: "2026-03-31" })).toBe(expected);
+  });
+});
+
+describe("validateLiabilityHistory (date-ordered)", () => {
+  const open = egp(1_000);
+
+  it.each([
+    ["no records", [], [], true],
+    ["a payment within the opening balance", [], [pay("2026-02-01", 1_000)], true],
+    ["a payment one piaster above the opening balance", [], [{ date: "2026-02-01", amount: egp(1_000) + 1 }], false],
+    ["borrowing first funds a later payment", [upd("2026-02-01", 500)], [pay("2026-02-02", 1_500)], true],
+    ["a payment dated BEFORE the borrowing that funds it", [upd("2026-02-02", 500)], [pay("2026-02-01", 1_500)], false],
+    ["borrowing and payment on the same day", [upd("2026-02-01", 500)], [pay("2026-02-01", 1_500)], true],
+    ["a correction downwards below zero", [upd("2026-02-01", -1_001)], [], false],
+    ["paid off, then borrowed again, then paid", [upd("2026-03-01", 200)], [pay("2026-02-01", 1_000), pay("2026-03-02", 200)], true],
+  ])("%s", (_name, updates, payments, ok) => {
+    expect(validateLiabilityHistory(open, updates, payments).ok).toBe(ok);
+  });
+
+  it("names the first offending date and no amount", () => {
+    const r = validateLiabilityHistory(open, [upd("2026-02-02", 500)], [pay("2026-02-01", 1_500)]);
+    expect(r).toMatchObject({ ok: false, date: "2026-02-01" });
+    expect(r.ok === false && /\d,\d|EGP/.test(r.message)).toBe(false);
+  });
+
+  it("an accepted history never needs outstanding() to clamp", () => {
+    const updates = [upd("2026-02-01", 500), upd("2026-03-10", -100)];
+    const payments = [pay("2026-02-05", 900), pay("2026-03-01", 400)];
+    expect(validateLiabilityHistory(open, updates, payments).ok).toBe(true);
+    for (const d of ["2026-01-01", "2026-02-01", "2026-02-05", "2026-03-01", "2026-03-10", "2026-12-31"]) {
+      expect(outstanding(open, updates, payments, d)).toBe(open + updates.filter((u) => u.date <= d).reduce((s, u) => s + u.delta, 0) - payments.filter((p) => p.date <= d).reduce((s, p) => s + p.amount, 0));
+    }
+  });
+
+  it("outstanding() still clamps legacy data that would go negative", () => {
+    expect(outstanding(open, [upd("2026-02-02", 500)], [pay("2026-02-01", 1_500)], "2026-02-01")).toBe(0);
   });
 });

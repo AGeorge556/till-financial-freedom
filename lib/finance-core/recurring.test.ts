@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { addDays, dateOn, daysBetween, dueDates, missingOccurrences, upcomingInMonth, type RecurringTemplate } from "./recurring";
+import { addDays, dateOn, daysBetween, dueDates, missingOccurrences, upcomingInMonth, type RecurringRow, type RecurringTemplate } from "./recurring";
 
 const t = (over: Partial<RecurringTemplate> = {}): RecurringTemplate => ({
   id: "t1",
@@ -107,8 +107,8 @@ describe("upcomingInMonth (B3)", () => {
     t({ id: "ended", startDate: "2025-06-12", endDate: "2026-02-12" }),
     t({ id: "later", startDate: "2026-04-01" }),
   ];
-  const existing = [
-    { templateId: "internet", dueDate: "2026-03-20", status: "pending" as const },
+  const existing: RecurringRow[] = [
+    { templateId: "internet", dueDate: "2026-03-20", status: "pending", type: "EXPENSE", amount: 50_000, categoryId: "internet", accountId: "bank" },
     { templateId: "gym", dueDate: "2026-03-25", status: "posted" as const },
     { templateId: "skipped", dueDate: "2026-03-28", status: "void" as const },
   ];
@@ -124,8 +124,33 @@ describe("upcomingInMonth (B3)", () => {
   });
 
   it("ignores a pending row that belongs to another month", () => {
-    const stale = [{ templateId: "rent", dueDate: "2026-02-01", status: "pending" as const }];
+    const stale: RecurringRow[] = [{ templateId: "rent", dueDate: "2026-02-01", status: "pending", type: "EXPENSE", amount: 400_000, categoryId: "rent", accountId: "bank" }];
     expect(upcomingInMonth([templates[0]], stale, range, "2026-03-10").map((i) => i.dueDate)).toEqual(["2026-03-01"]);
+  });
+
+  it("a pending row keeps its own edited amount, category and account, not the template's", () => {
+    const edited: RecurringRow[] = [
+      { templateId: "internet", dueDate: "2026-03-20", status: "pending", type: "EXPENSE", amount: 65_000, categoryId: "utilities", accountId: "card" },
+    ];
+    const item = upcomingInMonth(templates, edited, range, "2026-03-10").find((i) => i.templateId === "internet");
+    expect(item).toMatchObject({ pending: true, amount: 65_000, categoryId: "utilities", accountId: "card" });
+  });
+
+  it("counts a pending row whose template is paused or no longer listed", () => {
+    const rows: RecurringRow[] = [
+      { templateId: "off", dueDate: "2026-03-15", status: "pending", type: "EXPENSE", amount: 77_000, categoryId: "x", accountId: "bank" },
+      { templateId: "gone", dueDate: "2026-03-16", status: "pending", type: "INCOME", amount: 88_000, categoryId: null, accountId: "bank" },
+    ];
+    const items = upcomingInMonth(templates, rows, range, "2026-03-10").filter((i) => i.pending);
+    expect(items.map((i) => [i.templateId, i.amount, i.type])).toEqual([
+      ["off", 77_000, "EXPENSE"],
+      ["gone", 88_000, "INCOME"],
+    ]);
+  });
+
+  it("a generated pending row is not listed twice (once from the row, once from the template)", () => {
+    const items = upcomingInMonth(templates, existing, range, "2026-03-10");
+    expect(items.filter((i) => i.templateId === "internet")).toHaveLength(1);
   });
 
   it("a month that is already over has nothing upcoming", () => {

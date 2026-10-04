@@ -5,7 +5,8 @@ import { db } from "@/db";
 import { savingsTargetMode, userSettings } from "@/db/schema";
 import { requireUserId } from "@/lib/auth";
 import { parseEGP } from "@/lib/finance-core/money";
-import { type ActionState, str } from "./shared";
+import { MIX_CLASSES, type MixClass, validateTargets } from "@/lib/finance-core/portfolioMix";
+import { type ActionState, flag, str } from "./shared";
 
 const AMOUNT_ERROR = "Enter an amount like 1,250.50 (up to 2 decimals, no minus sign).";
 
@@ -85,5 +86,63 @@ export async function setExpectedMonthly(_prev: ActionState, formData: FormData)
   if (income === undefined || spending === undefined) return { error: AMOUNT_ERROR };
 
   await upsert(userId, { expectedMonthlyIncome: income, expectedMonthlySpending: spending });
+  return {};
+}
+
+/** "40" or "12.5" (a percent, up to 2 decimals) to hundredths of a percent (12.5 -> 1250); null if malformed or above 100. */
+function percentToHundredths(text: string): number | null {
+  const m = /^(\d{1,3})(?:\.(\d{1,2}))?$/.exec(text);
+  if (!m) return null;
+  const hundredths = Number(m[1] + (m[2] ?? "").padEnd(2, "0"));
+  return hundredths > 10_000 ? null : hundredths;
+}
+
+/** P2: the share wanted in each class (fields stocks, gold, clouds, cash, typed like "40"). All four totalling 100, or all blank to clear. */
+export async function setPortfolioTargets(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  const userId = await requireUserId();
+  const typed: Partial<Record<MixClass, number>> = {};
+  for (const c of MIX_CLASSES) {
+    const text = str(formData, c);
+    if (text === "") continue;
+    const hundredths = percentToHundredths(text);
+    if (hundredths === null) return { error: "Enter each target as a percent from 0 to 100, like 40 or 12.5." };
+    typed[c] = hundredths / 10_000;
+  }
+  const check = validateTargets(typed);
+  if (!check.ok) return { error: check.error };
+
+  const t = check.targets;
+  await upsert(userId, {
+    targetStocks: t ? t.stocks.toFixed(5) : null,
+    targetGold: t ? t.gold.toFixed(5) : null,
+    targetClouds: t ? t.clouds.toFixed(5) : null,
+    targetCash: t ? t.cash.toFixed(5) : null,
+  });
+  return {};
+}
+
+/** I3: a spending change is shown only if it reaches both this percent (0-100) and this amount. */
+export async function setInsightThresholds(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  const userId = await requireUserId();
+  const percent = percentToHundredths(str(formData, "percent"));
+  const amount = parseEGP(str(formData, "amount"));
+  if (percent === null) return { error: "Enter the smallest change as a percent from 0 to 100, like 15." };
+  if (amount === null) return { error: AMOUNT_ERROR };
+
+  await upsert(userId, { insightMinPercent: (percent / 10_000).toFixed(4), insightMinAmount: amount });
+  return {};
+}
+
+/** R1: one checkbox per reminder kind (review, recurring, stale, goal, budget, savings); unticked means off. */
+export async function setReminderSwitches(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  const userId = await requireUserId();
+  await upsert(userId, {
+    remindReview: flag(formData, "review"),
+    remindRecurring: flag(formData, "recurring"),
+    remindStale: flag(formData, "stale"),
+    remindGoal: flag(formData, "goal"),
+    remindBudget: flag(formData, "budget"),
+    remindSavings: flag(formData, "savings"),
+  });
   return {};
 }

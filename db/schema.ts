@@ -91,6 +91,20 @@ export const userSettings = pgTable(
     // Share of a budget spent at which it warns / alerts (0.8 = 80%).
     budgetWarnAt: numeric("budget_warn_at", { precision: 4, scale: 3 }).notNull().default("0.8"),
     budgetAlertAt: numeric("budget_alert_at", { precision: 4, scale: 3 }).notNull().default("1.0"),
+    // Target mix of the portfolio (fractions): all four set and totalling 1, or none.
+    targetStocks: numeric("target_stocks", { precision: 6, scale: 5 }),
+    targetGold: numeric("target_gold", { precision: 6, scale: 5 }),
+    targetClouds: numeric("target_clouds", { precision: 6, scale: 5 }),
+    targetCash: numeric("target_cash", { precision: 6, scale: 5 }),
+    // A spending change is an insight only if it is at least this share AND at least this amount (piasters).
+    insightMinPercent: numeric("insight_min_percent", { precision: 5, scale: 4 }).notNull().default("0.15"),
+    insightMinAmount: piasters("insight_min_amount").notNull().default(50000),
+    remindReview: boolean("remind_review").notNull().default(true),
+    remindRecurring: boolean("remind_recurring").notNull().default(true),
+    remindStale: boolean("remind_stale").notNull().default(true),
+    remindGoal: boolean("remind_goal").notNull().default(true),
+    remindBudget: boolean("remind_budget").notNull().default(true),
+    remindSavings: boolean("remind_savings").notNull().default(true),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -100,6 +114,14 @@ export const userSettings = pgTable(
     check("user_settings_stale_days_gold_range", sql`stale_days_gold between 1 and 365`),
     check("user_settings_stale_days_clouds_range", sql`stale_days_clouds between 1 and 365`),
     check("user_settings_budget_thresholds_check", sql`budget_warn_at > 0 and budget_warn_at <= budget_alert_at and budget_alert_at <= 2`),
+    check(
+      "user_settings_target_mix_check",
+      sql`(target_stocks is null and target_gold is null and target_clouds is null and target_cash is null)
+        or (target_stocks is not null and target_gold is not null and target_clouds is not null and target_cash is not null
+          and target_stocks between 0 and 1 and target_gold between 0 and 1 and target_clouds between 0 and 1 and target_cash between 0 and 1
+          and abs(target_stocks + target_gold + target_clouds + target_cash - 1) <= 0.00001)`,
+    ),
+    check("user_settings_insight_thresholds_check", sql`insight_min_percent >= 0 and insight_min_amount >= 0`),
     ownerOnly("user_settings"),
   ],
 ).enableRLS();
@@ -489,6 +511,8 @@ export const financialAssumptions = pgTable(
     savingsCloudApy: rate("savings_cloud_apy"),
     cashReturn: rate("cash_return"),
     inflation: rate("inflation"),
+    // Yearly growth of monthly income in the scenario calculator (0.05 = 5%).
+    incomeGrowth: rate("income_growth"),
     updatedAt: updatedAt(),
   },
   () => [ownerOnly("financial_assumptions")],

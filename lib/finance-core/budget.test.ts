@@ -84,7 +84,7 @@ describe("warnings (B4)", () => {
     [799_999, "ok"],
     [800_000, "warn"],
     [999_999, "warn"],
-    [1_000_000, "over"],
+    [1_000_000, "alert"], // exactly the budget: alerted, but no money is exceeded yet
     [1_000_001, "over"],
   ])("spent %i piasters -> %s", (spent, level) => {
     const s = status({ expenses: [{ ...exp("2026-03-10", 0), amount: spent }], today: "2026-03-31" });
@@ -110,7 +110,13 @@ describe("warnings (B4)", () => {
 
   it("uses the thresholds it is given", () => {
     expect(status({ expenses: [exp("2026-03-10", 5_000)], warnAt: 0.5, alertAt: 0.6 }).level).toBe("warn");
-    expect(status({ expenses: [exp("2026-03-10", 6_000)], warnAt: 0.5, alertAt: 0.6 }).level).toBe("over");
+    expect(status({ expenses: [exp("2026-03-10", 6_000)], warnAt: 0.5, alertAt: 0.6 }).level).toBe("alert");
+    expect(status({ expenses: [exp("2026-03-10", 10_000.01)], warnAt: 0.5, alertAt: 0.6 }).level).toBe("over");
+  });
+
+  it("an alert level below 100% alerts without calling it over budget", () => {
+    const s = status({ expenses: [exp("2026-03-10", 9_500)], alertAt: 0.9 });
+    expect([s.level, s.remaining > 0]).toEqual(["alert", true]);
   });
 
   it.each([0, -1, 1.5])("refuses a budget of %s", (budget) => {
