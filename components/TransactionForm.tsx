@@ -4,7 +4,9 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { addExpense, addIncome, addTransfer, editTransaction, voidTransaction } from "@/app/actions/transactions";
 import type { ActionState } from "@/app/actions/shared";
+import { RemoveButton } from "./Correct";
 import { Form } from "./Form";
+import { dateText } from "./HoldingFormat";
 import { Field, field, primaryBtn } from "./ui";
 
 export type Kind = "EXPENSE" | "INCOME" | "TRANSFER";
@@ -202,24 +204,13 @@ export function TransactionForm({
       </Form>
 
       {editing && (
-        <Form
+        <RemoveButton
           action={voidTransaction}
-          onSuccess={onDone}
-          confirm="Void this transaction? It stays in your history but stops counting."
-        >
-          {({ pending }) => (
-            <>
-              <input type="hidden" name="id" value={initial.id} />
-              <button
-                type="submit"
-                disabled={pending}
-                className="mt-3 min-h-11 w-full rounded-xl border border-border px-4 font-medium text-negative disabled:opacity-60"
-              >
-                {pending ? "Voiding…" : "Void"}
-              </button>
-            </>
-          )}
-        </Form>
+          id={initial.id}
+          noun={kind.toLowerCase()}
+          what={`${kind.toLowerCase()} of ${dateText(initial.date)}`}
+          onDone={onDone}
+        />
       )}
     </>
   );

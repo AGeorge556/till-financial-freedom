@@ -14,7 +14,7 @@ export default function Page() {
       <BackLink href="/more">More</BackLink>
       <h1 className="text-3xl font-semibold tracking-tight">Backup</h1>
       <p className="mt-2 text-muted">
-        The backup is a file with every account, category and transaction, including voided ones. Keep a copy
+        The backup is a file with every account, category and transaction, including removed ones. Keep a copy
         somewhere other than this phone, and download a fresh one after you add data.
       </p>
 

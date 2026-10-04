@@ -1,22 +1,40 @@
+"use client";
+
 import type { LiabilityEntry } from "@/app/(app)/more/liabilities/data";
 import { Amount } from "./Amount";
+import { EntryList } from "./Correct";
 import { dateText } from "./HoldingFormat";
-import { LiabilityVoidButton } from "./LiabilityForms";
+import { LiabilityUpdateForm, PaymentForm } from "./LiabilityForms";
+import type { AccountOption, CategoryOption } from "./TransactionForm";
 
-/** Payments and manual updates, newest first. A payment can be voided (principal and interest together); updates are append-only. */
-export function LiabilityHistory({ entries }: { entries: LiabilityEntry[] }) {
-  if (entries.length === 0) return <p className="text-muted">Nothing recorded yet.</p>;
+const what = (e: LiabilityEntry) => `${e.kind === "payment" ? "payment" : "update"} of ${dateText(e.date)}`;
+
+/**
+ * Payments and manual updates, newest first. Each opens its form, filled in, to be corrected or removed. A payment is
+ * corrected as one (principal and interest together). Removed entries wait behind "Show removed".
+ */
+export function LiabilityHistory({
+  entries,
+  liabilityId,
+  accounts,
+  categories,
+  today,
+}: {
+  entries: LiabilityEntry[];
+  liabilityId: string;
+  accounts: AccountOption[];
+  categories: CategoryOption[];
+  today: string;
+}) {
   return (
-    <ul className="divide-y divide-border overflow-hidden rounded-2xl border border-border bg-surface">
-      {entries.map((e) => (
-        <li key={e.key} className={`px-4 py-3 ${e.kind === "payment" && e.voided ? "text-muted" : ""}`}>
-          <div className="flex items-baseline justify-between gap-3">
-            <span className="min-w-0 font-medium">
-              {e.kind === "payment" ? "Payment" : e.delta > 0 ? "Owe more" : "Owe less"}
-              {e.kind === "payment" && e.voided && (
-                <span className="ml-2 rounded-full border border-border px-2 py-0.5 text-xs font-normal">voided</span>
-              )}
-            </span>
+    <EntryList
+      entries={entries}
+      name={what}
+      title={(e) => `Edit ${what(e)}`}
+      row={(e) => (
+        <>
+          <span className="flex items-baseline justify-between gap-3">
+            <span className="min-w-0 break-words font-medium">{e.kind === "payment" ? "Payment" : e.delta > 0 ? "Owe more" : "Owe less"}</span>
             <span className="shrink-0 font-medium">
               {e.kind === "payment" ? (
                 <>
@@ -29,13 +47,13 @@ export function LiabilityHistory({ entries }: { entries: LiabilityEntry[] }) {
                 </>
               )}
             </span>
-          </div>
-          <p className="text-sm text-muted">
+          </span>
+          <span className="block break-words text-sm text-muted">
             {dateText(e.date)}
             {e.note ? ` · ${e.note}` : ""}
-          </p>
+          </span>
           {e.kind === "payment" ? (
-            <p className="text-sm text-muted">
+            <span className="block break-words text-sm text-muted">
               Principal, reduces the loan.
               {e.interest > 0 && (
                 <>
@@ -43,13 +61,40 @@ export function LiabilityHistory({ entries }: { entries: LiabilityEntry[] }) {
                   Interest <Amount value={e.interest} showPiasters />, counted as spending.
                 </>
               )}
-            </p>
+            </span>
           ) : (
-            <p className="text-sm text-muted">No cash moved.</p>
+            <span className="block break-words text-sm text-muted">No cash moved.</span>
           )}
-          {e.kind === "payment" && !e.voided && <LiabilityVoidButton id={e.txId} what={`payment of ${dateText(e.date)}`} />}
-        </li>
-      ))}
-    </ul>
+        </>
+      )}
+      sheet={(e, done) =>
+        e.kind === "payment" ? (
+          <PaymentForm
+            liabilityId={liabilityId}
+            accounts={accounts}
+            categories={categories}
+            today={today}
+            onDone={done}
+            editing={{
+              id: e.txId,
+              principal: e.principal,
+              interest: e.interest,
+              categoryId: e.categoryId,
+              accountId: e.accountId,
+              date: e.date,
+              note: e.note,
+              what: what(e),
+            }}
+          />
+        ) : (
+          <LiabilityUpdateForm
+            liabilityId={liabilityId}
+            today={today}
+            onDone={done}
+            editing={{ id: e.id, delta: e.delta, date: e.date, note: e.note, what: what(e) }}
+          />
+        )
+      }
+    />
   );
 }

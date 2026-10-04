@@ -242,7 +242,8 @@ export const liabilities = pgTable(
   ],
 ).enableRLS();
 
-// Append-only: a change that moves no cash (borrowed more, correction). Signed: + owes more, - owes less.
+// A change that moves no cash (borrowed more, correction). Signed: + owes more, - owes less. Never edited or deleted:
+// a correction sets voided_at and inserts a replacement in the same transaction; every calculation ignores voided rows.
 export const liabilityUpdates = pgTable(
   "liability_updates",
   {
@@ -253,6 +254,7 @@ export const liabilityUpdates = pgTable(
       .references(() => liabilities.id, { onDelete: "cascade" }),
     date: date("date", { mode: "string" }).notNull(),
     delta: piasters("delta").notNull(),
+    voidedAt: timestamp("voided_at", { withTimezone: true }),
     note: text("note"),
     createdAt: createdAt(),
   },
@@ -394,7 +396,8 @@ export const transactions = pgTable(
   ],
 ).enableRLS();
 
-// Append-only: a price is never edited, a newer row supersedes it (step function by date).
+// A newer row supersedes an older one (step function by date). A typo is corrected by voiding the row (voided_at) and
+// inserting a replacement in one transaction; voided rows are ignored by every calculation but kept and backed up.
 export const priceUpdates = pgTable(
   "price_updates",
   {
@@ -404,6 +407,7 @@ export const priceUpdates = pgTable(
       .notNull()
       .references(() => holdings.id, { onDelete: "cascade" }),
     date: date("date", { mode: "string" }).notNull(),
+    voidedAt: timestamp("voided_at", { withTimezone: true }),
     price: decimal6("price").notNull(),
     createdAt: createdAt(),
   },
@@ -414,7 +418,7 @@ export const priceUpdates = pgTable(
   ],
 ).enableRLS();
 
-// Append-only, no cash. BONUS adds quantity, SPLIT multiplies it by ratio, WRITE_OFF zeroes quantity and cost basis.
+// No cash; corrected by voiding and replacing, like price_updates. BONUS adds quantity, SPLIT multiplies it by ratio, WRITE_OFF zeroes quantity and cost basis.
 export const corporateActions = pgTable(
   "corporate_actions",
   {
@@ -427,6 +431,7 @@ export const corporateActions = pgTable(
     date: date("date", { mode: "string" }).notNull(),
     quantity: decimal6("quantity"),
     ratio: decimal6("ratio"),
+    voidedAt: timestamp("voided_at", { withTimezone: true }),
     note: text("note"),
     createdAt: createdAt(),
   },
@@ -449,7 +454,7 @@ export const corporateActions = pgTable(
 // Nullable on purpose: assumptions are user-set, never hard-coded defaults.
 const rate = (name: string) => numeric(name, { precision: 8, scale: 6 });
 
-// Gold prices are global, not per holding: the BUY-BACK price per gram. Append-only, a newer row supersedes (step function).
+// Gold prices are global, not per holding: the BUY-BACK price per gram. A newer row supersedes (step function); corrected by voiding and replacing.
 // In derive_24k mode only karat 24 rows are used; the other karats are derived.
 export const goldPrices = pgTable(
   "gold_prices",
@@ -458,6 +463,7 @@ export const goldPrices = pgTable(
     userId: userId(),
     date: date("date", { mode: "string" }).notNull(),
     karat: integer("karat").notNull(),
+    voidedAt: timestamp("voided_at", { withTimezone: true }),
     buybackPrice: decimal6("buyback_price").notNull(),
     createdAt: createdAt(),
   },
@@ -469,7 +475,7 @@ export const goldPrices = pgTable(
   ],
 ).enableRLS();
 
-// Append-only: an APY change is a new row with an effective date, never an edit. Effective annual rate (0.20 = 20%).
+// An APY change is a new row with an effective date; corrected by voiding and replacing, never edited. Effective annual rate (0.20 = 20%).
 export const rateHistory = pgTable(
   "rate_history",
   {
@@ -479,6 +485,7 @@ export const rateHistory = pgTable(
       .notNull()
       .references(() => holdings.id, { onDelete: "cascade" }),
     effectiveDate: date("effective_date", { mode: "string" }).notNull(),
+    voidedAt: timestamp("voided_at", { withTimezone: true }),
     apy: rate("apy").notNull(),
     createdAt: createdAt(),
   },
@@ -489,7 +496,7 @@ export const rateHistory = pgTable(
   ],
 ).enableRLS();
 
-// Append-only: the value the user read off the product. The latest one is the anchor of the cloud's estimate.
+// The value the user read off the product (corrected by voiding and replacing). The latest one is the anchor of the cloud's estimate.
 export const cloudConfirmations = pgTable(
   "cloud_confirmations",
   {
@@ -499,6 +506,7 @@ export const cloudConfirmations = pgTable(
       .notNull()
       .references(() => holdings.id, { onDelete: "cascade" }),
     date: date("date", { mode: "string" }).notNull(),
+    voidedAt: timestamp("voided_at", { withTimezone: true }),
     value: piasters("value").notNull(),
     createdAt: createdAt(),
   },

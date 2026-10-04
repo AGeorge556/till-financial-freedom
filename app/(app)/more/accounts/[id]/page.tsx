@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ACCOUNT_TYPE_LABEL } from "@/components/accountTypes";
 import { Amount } from "@/components/Amount";
+import { AdjustmentList } from "@/components/AdjustmentForms";
 import { BackLink, card } from "@/components/ui";
 import { accountValue, holdingsByAccount, loadInvestments } from "@/app/(app)/investments/data";
 import { accountBalances, listAccounts, listTransactions } from "@/db/queries";
@@ -24,6 +25,9 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
   const account = accounts.find((a) => a.id === id);
   if (!account) notFound();
   const balance = accountBalances([account], txRows).get(account.id) ?? 0;
+  const adjustments = txRows
+    .filter((r) => r.type === "ADJUSTMENT" && r.toAccountId === account.id && r.status !== "pending")
+    .map((r) => ({ key: r.id, id: r.id, date: r.date, amount: r.amount, note: r.note, removed: r.status === "void" }));
   const archived = account.archivedAt !== null;
   // A brokerage account is worth its cash plus what it holds, the same figure Home shows. Set balance changes the cash part only.
   const inv = account.isInvestment ? await loadInvestments(userId, cairoToday()) : null;
@@ -83,6 +87,14 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
       </section>
 
       <section className="mt-8">
+        <h2 className="mb-2 text-lg font-semibold tracking-tight">Balance adjustments</h2>
+        <AdjustmentList rows={adjustments} />
+        <p className="mt-2 text-sm text-muted">
+          Tap one to change its date or note, or to remove it. To change its amount, set the balance again above.
+        </p>
+      </section>
+
+      <section className="mt-8">
         <h2 className="mb-2 text-lg font-semibold tracking-tight">Details</h2>
         <div className={`p-5 ${card}`}>
           <EditAccountForm
@@ -90,6 +102,9 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
             name={account.name}
             institution={account.institution}
             notes={account.notes}
+            type={account.type}
+            openingBalance={account.openingBalance}
+            isInvestment={account.isInvestment}
           />
         </div>
       </section>

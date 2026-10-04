@@ -9,13 +9,16 @@ import { validateLiabilityHistory } from "./finance-core/liabilities";
 import type { Piasters } from "./finance-core/money";
 import { DEFAULT_STALE_DAYS, type HoldingEvent, purchaseCash, saleCash, validateHistory } from "./finance-core/portfolio";
 import { validateTargets } from "./finance-core/portfolioMix";
+import { visibleRows } from "./finance-core/voided";
 
 // Pure: no React, Next.js or database imports. The enum lists below mirror db/schema.ts (backup.test.ts checks they match).
 
-export const BACKUP_VERSION = 6;
+export const BACKUP_VERSION = 7;
 // Version 1 files (no goals, rules or savings settings), version 2 files (no holdings), version 3 files
 // (no gold, clouds, liabilities or holding shares), version 4 files (no budgets, recurring items or expense-based goal
-// targets) and version 5 files (no portfolio targets, insight thresholds, reminder switches or income growth) still restore.
+// targets), version 5 files (no portfolio targets, insight thresholds, reminder switches or income growth) and version 6
+// files (price updates, gold prices, corporate actions, rate changes, cloud confirmations and loan updates could not be
+// voided, so they have no voidedAt) still restore; voidedAt is then null.
 const OLDEST_VERSION = 1;
 
 export const ACCOUNT_TYPES = ["bank", "cash", "wallet", "brokerage", "savings", "credit_card", "receivable", "other"] as const;
@@ -163,6 +166,8 @@ export type BackupGoldPrice = {
   karat: number;
   /** Decimal string, buy-back price per gram. */
   buybackPrice: string;
+  /** A removed or replaced record stays in the file, marked void; every calculation skips it. */
+  voidedAt: string | null;
   createdAt: string;
 };
 
@@ -172,6 +177,7 @@ export type BackupRateChange = {
   effectiveDate: string;
   /** Decimal: 0.2 = 20%. */
   apy: number;
+  voidedAt: string | null;
   createdAt: string;
 };
 
@@ -180,6 +186,7 @@ export type BackupCloudConfirmation = {
   holdingId: string;
   date: string;
   value: Piasters;
+  voidedAt: string | null;
   createdAt: string;
 };
 
@@ -204,6 +211,7 @@ export type BackupLiabilityUpdate = {
   /** Signed: positive owes more. */
   delta: Piasters;
   note: string | null;
+  voidedAt: string | null;
   createdAt: string;
 };
 
@@ -213,6 +221,7 @@ export type BackupPriceUpdate = {
   date: string;
   /** Decimal string, price per unit. */
   price: string;
+  voidedAt: string | null;
   createdAt: string;
 };
 
@@ -224,6 +233,7 @@ export type BackupCorporateAction = {
   quantity: string | null;
   ratio: string | null;
   note: string | null;
+  voidedAt: string | null;
   createdAt: string;
 };
 
@@ -380,13 +390,13 @@ type BudgetRow = Dated<BackupBudget, "createdAt" | "updatedAt">;
 // The column is the whole transaction_type enum; a CHECK limits it to INCOME and EXPENSE.
 type RecurringTemplateRow = Dated<Omit<BackupRecurringTemplate, "type"> & { type: TxType }, "createdAt" | "updatedAt">;
 type HoldingRow = Dated<BackupHolding, "archivedAt" | "createdAt" | "updatedAt">;
-type GoldPriceRow = Dated<BackupGoldPrice, "createdAt">;
-type RateChangeRow = Rated<Dated<BackupRateChange, "createdAt">, "apy">;
-type CloudConfirmationRow = Dated<BackupCloudConfirmation, "createdAt">;
+type GoldPriceRow = Dated<BackupGoldPrice, "voidedAt" | "createdAt">;
+type RateChangeRow = Rated<Dated<BackupRateChange, "voidedAt" | "createdAt">, "apy">;
+type CloudConfirmationRow = Dated<BackupCloudConfirmation, "voidedAt" | "createdAt">;
 type LiabilityRow = Rated<Dated<BackupLiability, "archivedAt" | "createdAt" | "updatedAt">, "interestRate">;
-type LiabilityUpdateRow = Dated<BackupLiabilityUpdate, "createdAt">;
-type PriceUpdateRow = Dated<BackupPriceUpdate, "createdAt">;
-type CorporateActionRow = Dated<BackupCorporateAction, "createdAt">;
+type LiabilityUpdateRow = Dated<BackupLiabilityUpdate, "voidedAt" | "createdAt">;
+type PriceUpdateRow = Dated<BackupPriceUpdate, "voidedAt" | "createdAt">;
+type CorporateActionRow = Dated<BackupCorporateAction, "voidedAt" | "createdAt">;
 type AssumptionsRow = { [K in keyof BackupAssumptions]: number | string | null };
 
 const iso = (d: Date) => d.toISOString();
@@ -570,6 +580,7 @@ export function serializeBackup(rows: BackupRows, exportedAt: Date = new Date())
       holdingId: p.holdingId,
       date: p.date,
       price: p.price,
+      voidedAt: isoOrNull(p.voidedAt),
       createdAt: iso(p.createdAt),
     })),
     corporateActions: rows.corporateActions.map((c) => ({
@@ -580,6 +591,7 @@ export function serializeBackup(rows: BackupRows, exportedAt: Date = new Date())
       quantity: c.quantity,
       ratio: c.ratio,
       note: c.note,
+      voidedAt: isoOrNull(c.voidedAt),
       createdAt: iso(c.createdAt),
     })),
     goldPrices: rows.goldPrices.map((p) => ({
@@ -587,6 +599,7 @@ export function serializeBackup(rows: BackupRows, exportedAt: Date = new Date())
       date: p.date,
       karat: p.karat,
       buybackPrice: p.buybackPrice,
+      voidedAt: isoOrNull(p.voidedAt),
       createdAt: iso(p.createdAt),
     })),
     rateHistory: rows.rateHistory.map((r) => ({
@@ -594,6 +607,7 @@ export function serializeBackup(rows: BackupRows, exportedAt: Date = new Date())
       holdingId: r.holdingId,
       effectiveDate: r.effectiveDate,
       apy: Number(r.apy),
+      voidedAt: isoOrNull(r.voidedAt),
       createdAt: iso(r.createdAt),
     })),
     cloudConfirmations: rows.cloudConfirmations.map((c) => ({
@@ -601,6 +615,7 @@ export function serializeBackup(rows: BackupRows, exportedAt: Date = new Date())
       holdingId: c.holdingId,
       date: c.date,
       value: c.value,
+      voidedAt: isoOrNull(c.voidedAt),
       createdAt: iso(c.createdAt),
     })),
     liabilities: rows.liabilities.map((l) => ({
@@ -621,6 +636,7 @@ export function serializeBackup(rows: BackupRows, exportedAt: Date = new Date())
       date: u.date,
       delta: u.delta,
       note: u.note,
+      voidedAt: isoOrNull(u.voidedAt),
       createdAt: iso(u.createdAt),
     })),
     budgets: rows.budgets.map((b) => ({
@@ -1097,7 +1113,7 @@ function parseHolding(raw: unknown, i: number, version: number): BackupHolding {
 }
 
 // gold_prices_karat_check; decimal() already refuses a negative price (gold_prices_price_check).
-function parseGoldPrice(raw: unknown, i: number): BackupGoldPrice {
+function parseGoldPrice(raw: unknown, i: number, version: number): BackupGoldPrice {
   const w = `goldPrices[${i}]`;
   const o = entry(raw, w);
   const p: BackupGoldPrice = {
@@ -1105,6 +1121,7 @@ function parseGoldPrice(raw: unknown, i: number): BackupGoldPrice {
     date: day(o, "date", w),
     karat: whole(o, "karat", w, "24, 21 or 18"),
     buybackPrice: decimal(o, "buybackPrice", w),
+    voidedAt: version < 7 ? null : stampOrNull(o, "voidedAt", w),
     createdAt: stamp(o, "createdAt", w),
   };
   if (!(KARATS as readonly number[]).includes(p.karat)) bad(`${w}.karat`, "must be 24, 21 or 18");
@@ -1112,7 +1129,7 @@ function parseGoldPrice(raw: unknown, i: number): BackupGoldPrice {
 }
 
 // rate_history_apy_check.
-function parseRateChange(raw: unknown, i: number): BackupRateChange {
+function parseRateChange(raw: unknown, i: number, version: number): BackupRateChange {
   const w = `rateHistory[${i}]`;
   const o = entry(raw, w);
   const r: BackupRateChange = {
@@ -1120,6 +1137,7 @@ function parseRateChange(raw: unknown, i: number): BackupRateChange {
     holdingId: uuid(o, "holdingId", w),
     effectiveDate: day(o, "effectiveDate", w),
     apy: rate(o, "apy", w),
+    voidedAt: version < 7 ? null : stampOrNull(o, "voidedAt", w),
     createdAt: stamp(o, "createdAt", w),
   };
   if (r.apy <= -1) bad(`${w}.apy`, "must be above -1 (-100%)");
@@ -1127,7 +1145,7 @@ function parseRateChange(raw: unknown, i: number): BackupRateChange {
 }
 
 // cloud_confirmations_value_check.
-function parseCloudConfirmation(raw: unknown, i: number): BackupCloudConfirmation {
+function parseCloudConfirmation(raw: unknown, i: number, version: number): BackupCloudConfirmation {
   const w = `cloudConfirmations[${i}]`;
   const o = entry(raw, w);
   const c: BackupCloudConfirmation = {
@@ -1135,6 +1153,7 @@ function parseCloudConfirmation(raw: unknown, i: number): BackupCloudConfirmatio
     holdingId: uuid(o, "holdingId", w),
     date: day(o, "date", w),
     value: whole(o, "value", w),
+    voidedAt: version < 7 ? null : stampOrNull(o, "voidedAt", w),
     createdAt: stamp(o, "createdAt", w),
   };
   if (c.value < 0) bad(`${w}.value`, "must not be negative");
@@ -1163,7 +1182,7 @@ function parseLiability(raw: unknown, i: number): BackupLiability {
 }
 
 // liability_updates_delta_check.
-function parseLiabilityUpdate(raw: unknown, i: number): BackupLiabilityUpdate {
+function parseLiabilityUpdate(raw: unknown, i: number, version: number): BackupLiabilityUpdate {
   const w = `liabilityUpdates[${i}]`;
   const o = entry(raw, w);
   const u: BackupLiabilityUpdate = {
@@ -1172,6 +1191,7 @@ function parseLiabilityUpdate(raw: unknown, i: number): BackupLiabilityUpdate {
     date: day(o, "date", w),
     delta: whole(o, "delta", w),
     note: textOrNull(o, "note", w),
+    voidedAt: version < 7 ? null : stampOrNull(o, "voidedAt", w),
     createdAt: stamp(o, "createdAt", w),
   };
   if (u.delta === 0) bad(`${w}.delta`, "must not be zero");
@@ -1179,7 +1199,7 @@ function parseLiabilityUpdate(raw: unknown, i: number): BackupLiabilityUpdate {
 }
 
 // price_updates_price_check: decimal() already refuses a negative price.
-function parsePriceUpdate(raw: unknown, i: number): BackupPriceUpdate {
+function parsePriceUpdate(raw: unknown, i: number, version: number): BackupPriceUpdate {
   const w = `priceUpdates[${i}]`;
   const o = entry(raw, w);
   return {
@@ -1187,12 +1207,13 @@ function parsePriceUpdate(raw: unknown, i: number): BackupPriceUpdate {
     holdingId: uuid(o, "holdingId", w),
     date: day(o, "date", w),
     price: decimal(o, "price", w),
+    voidedAt: version < 7 ? null : stampOrNull(o, "voidedAt", w),
     createdAt: stamp(o, "createdAt", w),
   };
 }
 
 // Same rule as corporate_actions_kind_values_check in db/schema.ts.
-function parseCorporateAction(raw: unknown, i: number): BackupCorporateAction {
+function parseCorporateAction(raw: unknown, i: number, version: number): BackupCorporateAction {
   const w = `corporateActions[${i}]`;
   const o = entry(raw, w);
   const c: BackupCorporateAction = {
@@ -1203,6 +1224,7 @@ function parseCorporateAction(raw: unknown, i: number): BackupCorporateAction {
     quantity: decimalOrNull(o, "quantity", w),
     ratio: decimalOrNull(o, "ratio", w),
     note: textOrNull(o, "note", w),
+    voidedAt: version < 7 ? null : stampOrNull(o, "voidedAt", w),
     createdAt: stamp(o, "createdAt", w),
   };
   if (c.kind === "BONUS" && !(c.quantity !== null && !isZeroDecimal(c.quantity) && c.ratio === null)) {
@@ -1487,13 +1509,13 @@ function build(input: unknown): Backup {
   });
 
   const holdings = listSince(input, "holdings", version, 3).map((raw, i) => parseHolding(raw, i, version));
-  const priceUpdates = listSince(input, "priceUpdates", version, 3).map(parsePriceUpdate);
-  const corporateActions = listSince(input, "corporateActions", version, 3).map(parseCorporateAction);
-  const goldPrices = listSince(input, "goldPrices", version, 4).map(parseGoldPrice);
-  const rateHistory = listSince(input, "rateHistory", version, 4).map(parseRateChange);
-  const cloudConfirmations = listSince(input, "cloudConfirmations", version, 4).map(parseCloudConfirmation);
+  const priceUpdates = listSince(input, "priceUpdates", version, 3).map((raw, i) => parsePriceUpdate(raw, i, version));
+  const corporateActions = listSince(input, "corporateActions", version, 3).map((raw, i) => parseCorporateAction(raw, i, version));
+  const goldPrices = listSince(input, "goldPrices", version, 4).map((raw, i) => parseGoldPrice(raw, i, version));
+  const rateHistory = listSince(input, "rateHistory", version, 4).map((raw, i) => parseRateChange(raw, i, version));
+  const cloudConfirmations = listSince(input, "cloudConfirmations", version, 4).map((raw, i) => parseCloudConfirmation(raw, i, version));
   const liabilities = listSince(input, "liabilities", version, 4).map(parseLiability);
-  const liabilityUpdates = listSince(input, "liabilityUpdates", version, 4).map(parseLiabilityUpdate);
+  const liabilityUpdates = listSince(input, "liabilityUpdates", version, 4).map((raw, i) => parseLiabilityUpdate(raw, i, version));
   const budgets = listSince(input, "budgets", version, 5).map(parseBudget);
   const recurringTemplates = listSince(input, "recurringTemplates", version, 5).map(parseRecurringTemplate);
   const assumptions = parseAssumptions(input.assumptions, version);
@@ -1571,8 +1593,9 @@ function build(input: unknown): Backup {
     }
   });
 
-  // Rule F: a position that goes impossible on any date is refused before anything is written.
-  const events = eventsByHolding(toHoldingEvents(transactions, corporateActions));
+  // Rule F: a position that goes impossible on any date is refused before anything is written. A voided record is
+  // skipped exactly as the app skips it (a void ledger row never counts either), so every file the app writes restores.
+  const events = eventsByHolding(toHoldingEvents(transactions, visibleRows(corporateActions)));
   holdings.forEach((h, i) => {
     const check = validateHistory(events.get(h.id) ?? []);
     // No quantities in the message (the engine's own text quotes them): error text is plain text, which privacy mode does not hide.
@@ -1608,10 +1631,10 @@ function build(input: unknown): Backup {
     const cashFlows: CashFlow[] = transactions
       .filter((t) => t.holdingId === h.id && t.status === "posted" && (t.type === "INVESTMENT_PURCHASE" || t.type === "INVESTMENT_SALE"))
       .map((t) => ({ date: t.date, createdAt: stampOf(t.createdAt), kind: t.type === "INVESTMENT_PURCHASE" ? "deposit" : "withdrawal", amount: t.amount }));
-    const rates: RateChange[] = rateHistory
+    const rates: RateChange[] = visibleRows(rateHistory)
       .filter((r) => r.holdingId === h.id)
       .map((r) => ({ date: r.effectiveDate, createdAt: stampOf(r.createdAt), apy: r.apy }));
-    const confirmations: Confirmation[] = cloudConfirmations
+    const confirmations: Confirmation[] = visibleRows(cloudConfirmations)
       .filter((c) => c.holdingId === h.id)
       .map((c) => ({ date: c.date, createdAt: stampOf(c.createdAt), value: c.value }));
     try {
@@ -1628,7 +1651,7 @@ function build(input: unknown): Backup {
   liabilities.forEach((l, i) => {
     const check = validateLiabilityHistory(
       l.openingBalance,
-      liabilityUpdates.filter((u) => u.liabilityId === l.id),
+      visibleRows(liabilityUpdates).filter((u) => u.liabilityId === l.id),
       transactions
         .filter((t) => t.type === "LIABILITY_PAYMENT" && t.status === "posted" && t.liabilityId === l.id)
         .map((t) => ({ date: t.date, amount: t.amount })),

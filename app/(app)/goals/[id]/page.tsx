@@ -234,6 +234,10 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
             ))}
           </ul>
         )}
+        <p className="mt-2 text-sm text-muted">
+          These are a record of what happened and are not edited. To change one, set the amount or share again above (Add or change
+          allocation, or Fund from a holding): that records a new change.
+        </p>
       </section>
 
       <section className="mt-8 space-y-3">

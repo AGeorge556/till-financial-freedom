@@ -9,6 +9,7 @@ import {
   periodSummary,
   reconcile,
   type Tx,
+  validateAccountChange,
 } from "./ledger";
 
 const tx = (t: Partial<Tx> & Pick<Tx, "type" | "amount">): Tx => ({ date: "2026-03-10", status: "posted", ...t });
@@ -201,5 +202,32 @@ describe("fixture 7: reconciliation identity end to end", () => {
     const change = r.endNW - r.startNW;
     expect(reconcile(change, r.summary.savings, r.market, r.summary.adjustments).ok).toBe(true);
     expect(reconcile(change, r.summary.savings, r.market, 0)).toEqual({ ok: false, difference: egp(500) });
+  });
+});
+
+describe("validateAccountChange", () => {
+  const base = {
+    type: "bank",
+    isInvestment: false,
+    openingBalance: egp(1_000),
+    holdingsOnAccount: 0,
+    allocatedOnAccount: 0,
+    balanceBefore: egp(1_000),
+    balanceAfter: egp(1_000),
+  };
+
+  it.each([
+    ["nothing at stake", {}, { ok: true }],
+    ["a card may open negative", { type: "credit_card", openingBalance: -egp(500) }, { ok: true }],
+    ["a bank account may not open negative", { openingBalance: -egp(500) }, { ok: false, error: "negative-opening" }],
+    ["holdings stay on an investment account", { holdingsOnAccount: 2, isInvestment: true }, { ok: true }],
+    ["holdings cannot stay when the flag is turned off", { holdingsOnAccount: 2 }, { ok: false, error: "holdings-need-investment" }],
+    ["earmarks within the new balance", { allocatedOnAccount: egp(800), balanceAfter: egp(900) }, { ok: true }],
+    ["earmarks above the new balance", { allocatedOnAccount: egp(800), balanceAfter: egp(700) }, { ok: false, error: "earmarks-exceed-balance" }],
+    ["a negative balance has nothing to earmark", { allocatedOnAccount: 1, balanceAfter: -egp(5) }, { ok: false, error: "earmarks-exceed-balance" }],
+    ["already over-allocated and not made worse", { allocatedOnAccount: egp(800), balanceBefore: egp(500), balanceAfter: egp(600) }, { ok: true }],
+    ["already over-allocated and made worse", { allocatedOnAccount: egp(800), balanceBefore: egp(500), balanceAfter: egp(400) }, { ok: false, error: "earmarks-exceed-balance" }],
+  ])("%s", (_name, change, expected) => {
+    expect(validateAccountChange({ ...base, ...change })).toEqual(expected);
   });
 });

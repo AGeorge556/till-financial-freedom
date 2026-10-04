@@ -7,7 +7,7 @@ import { Panel, Row } from "@/components/HoldingParts";
 import { EditLoanForm, LiabilityArchiveButton, LiabilityUpdateForm, PaymentForm } from "@/components/LiabilityForms";
 import { LiabilityHistory } from "@/components/LiabilityHistory";
 import { BackLink, card } from "@/components/ui";
-import { listAccounts, listCategories, toLedgerTx } from "@/db/queries";
+import { listAccounts, listCategories, loadRemovedRecords, toLedgerTx } from "@/db/queries";
 import { requireUserId } from "@/lib/auth";
 import { periodSummary } from "@/lib/finance-core/ledger";
 import { cairoToday } from "@/lib/finance-core/time";
@@ -25,10 +25,11 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
   const { id } = await params;
   if (!UUID.test(id)) notFound();
 
-  const [{ views }, accounts, categories] = await Promise.all([
+  const [{ views }, accounts, categories, removed] = await Promise.all([
     loadLiabilities(userId),
-    listAccounts(userId),
-    listCategories(userId),
+    listAccounts(userId, { includeArchived: true }),
+    listCategories(userId, { includeArchived: true }),
+    loadRemovedRecords(userId),
   ]);
   const loan = views.find((l) => l.id === id);
   if (!loan) notFound();
@@ -36,9 +37,11 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
   const today = cairoToday();
   // Principal and interest paid so far, from the engine (posted rows only).
   const paid = periodSummary(loan.transactions.map(toLedgerTx));
+  // Archived accounts and categories stay in the list, flagged: a saved payment may use one, and the form keeps only that one.
   const payFrom = accounts
     .filter((a) => a.type !== "credit_card" && a.type !== "receivable")
-    .map((a) => ({ id: a.id, name: a.name, archived: false }));
+    .map((a) => ({ id: a.id, name: a.name, archived: a.archivedAt !== null }));
+  const expenseCategories = categories.map((c) => ({ id: c.id, name: c.name, kind: c.kind, archived: c.archivedAt !== null }));
 
   return (
     <>
@@ -75,7 +78,7 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
         <section className="mt-6 space-y-3">
           <h2 className="sr-only">Record something</h2>
           <Panel title="Record a payment">
-            <PaymentForm liabilityId={loan.id} accounts={payFrom} categories={categories.map((c) => ({ id: c.id, name: c.name, kind: c.kind, archived: false }))} today={today} />
+            <PaymentForm liabilityId={loan.id} accounts={payFrom} categories={expenseCategories} today={today} />
           </Panel>
           <Panel title="Owe more, or correct the balance" hint="For changes that move no cash, like borrowing more or fixing a mistake.">
             <LiabilityUpdateForm liabilityId={loan.id} today={today} />
@@ -85,8 +88,16 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
 
       <section className="mt-8">
         <h2 className="mb-2 text-lg font-semibold tracking-tight">History</h2>
-        <LiabilityHistory entries={liabilityHistory(loan)} />
-        <p className="mt-2 text-sm text-muted">Updates are never edited. A payment can be voided, and it then stays here, marked.</p>
+        <LiabilityHistory
+          entries={liabilityHistory(loan, removed.liabilityUpdates)}
+          liabilityId={loan.id}
+          accounts={payFrom}
+          categories={expenseCategories}
+          today={today}
+        />
+        <p className="mt-2 text-sm text-muted">
+          Tap an entry to correct or remove it. A removed entry stops counting but stays in your history: use Show removed.
+        </p>
       </section>
 
       <section className="mt-8">
@@ -97,6 +108,7 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
             name={loan.name}
             kind={loan.kind}
             interestRate={loan.interestRate}
+            openingBalance={loan.openingBalance}
             startDate={loan.startDate}
             notes={loan.notes}
           />

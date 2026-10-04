@@ -48,6 +48,7 @@ import { goldPricesFor, type Karat } from "./finance-core/gold";
 import { accountBalance, netWorth, type Tx } from "./finance-core/ledger";
 import { outstanding } from "./finance-core/liabilities";
 import { portfolioValue, replayHolding } from "./finance-core/portfolio";
+import { visibleRows } from "./finance-core/voided";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const BANK = id(1);
@@ -78,6 +79,7 @@ const noGoldOrCloud = {
   contributionAmount: null as number | null,
   contributionFrequency: null as "weekly" | "monthly" | null,
 };
+const noVoid = { voidedAt: null as Date | null };
 const noHolding = { holdingId: null as string | null, percent: null as string | null };
 const noShare = { holdingId: null as string | null, percentDelta: null as string | null };
 
@@ -167,30 +169,30 @@ const rows = {
   ],
   // Gold is valued from these buy-back prices (per_karat mode: each karat has its own); 21K bought at 4,000 now buys back at 4,550.50.
   goldPrices: [
-    { ...base, id: id(101), date: "2026-03-05", karat: 21, buybackPrice: "4400.000000" },
-    { ...base, id: id(102), date: "2026-03-28", karat: 21, buybackPrice: "4550.500000" },
-    { ...base, id: id(103), date: "2026-03-28", karat: 24, buybackPrice: "5200.000000" },
+    { ...base, ...noVoid, id: id(101), date: "2026-03-05", karat: 21, buybackPrice: "4400.000000" },
+    { ...base, ...noVoid, id: id(102), date: "2026-03-28", karat: 21, buybackPrice: "4550.500000" },
+    { ...base, ...noVoid, id: id(103), date: "2026-03-28", karat: 24, buybackPrice: "5200.000000" },
   ],
   rateHistory: [
-    { ...base, id: id(111), holdingId: CLOUD, effectiveDate: "2026-03-01", apy: "0.200000" as string | number },
-    { ...base, id: id(112), holdingId: CLOUD, effectiveDate: "2026-03-25", apy: "0.150000" as string | number },
+    { ...base, ...noVoid, id: id(111), holdingId: CLOUD, effectiveDate: "2026-03-01", apy: "0.200000" as string | number },
+    { ...base, ...noVoid, id: id(112), holdingId: CLOUD, effectiveDate: "2026-03-25", apy: "0.150000" as string | number },
   ],
-  cloudConfirmations: [{ ...base, id: id(121), holdingId: CLOUD, date: "2026-03-01", value: 1_000_000, createdAt: at("2026-03-01T11:00:00.000Z") }],
+  cloudConfirmations: [{ ...base, ...noVoid, id: id(121), holdingId: CLOUD, date: "2026-03-01", value: 1_000_000, createdAt: at("2026-03-01T11:00:00.000Z") }],
   liabilities: [
     { ...base, id: LOAN, name: "Car loan", kind: "loan" as "loan" | "owed" | "other", openingBalance: 1_000_000, interestRate: "0.180000" as string | null, startDate: "2026-03-01", notes: null as string | null, archivedAt: null as Date | null, updatedAt: base.createdAt },
   ],
   liabilityUpdates: [
-    { ...base, id: id(131), liabilityId: LOAN, date: "2026-03-10", delta: 500_000, note: "borrowed more" as string | null },
-    { ...base, id: id(132), liabilityId: LOAN, date: "2026-03-20", delta: -50_000, note: null },
+    { ...base, ...noVoid, id: id(131), liabilityId: LOAN, date: "2026-03-10", delta: 500_000, note: "borrowed more" as string | null },
+    { ...base, ...noVoid, id: id(132), liabilityId: LOAN, date: "2026-03-20", delta: -50_000, note: null },
   ],
   priceUpdates: [
-    { ...base, id: id(81), holdingId: COMI, date: "2026-03-22", price: "11.250000" },
-    { ...base, id: id(82), holdingId: COMI, date: "2026-03-28", price: "12.000000" },
-    { ...base, id: id(83), holdingId: GOLD_FUND, date: "2026-03-28", price: "27.500000" },
+    { ...base, ...noVoid, id: id(81), holdingId: COMI, date: "2026-03-22", price: "11.250000" },
+    { ...base, ...noVoid, id: id(82), holdingId: COMI, date: "2026-03-28", price: "12.000000" },
+    { ...base, ...noVoid, id: id(83), holdingId: GOLD_FUND, date: "2026-03-28", price: "27.500000" },
   ],
   corporateActions: [
-    { ...base, id: id(91), holdingId: COMI, kind: "BONUS" as "BONUS" | "SPLIT" | "WRITE_OFF", date: "2026-03-10", quantity: "10.000000" as string | null, ratio: null as string | null, note: "1 for 10 bonus" as string | null },
-    { ...base, id: id(92), holdingId: GOLD_FUND, kind: "SPLIT" as const, date: "2026-03-15", quantity: null, ratio: "2.000000", note: null },
+    { ...base, ...noVoid, id: id(91), holdingId: COMI, kind: "BONUS" as "BONUS" | "SPLIT" | "WRITE_OFF", date: "2026-03-10", quantity: "10.000000" as string | null, ratio: null as string | null, note: "1 for 10 bonus" as string | null },
+    { ...base, ...noVoid, id: id(92), holdingId: GOLD_FUND, kind: "SPLIT" as const, date: "2026-03-15", quantity: null, ratio: "2.000000", note: null },
   ],
   assumptions: { stockReturn: "0.150000" as string | null, goldReturn: null as string | null, savingsCloudApy: "0.120000" as string | null, cashReturn: null as string | null, inflation: "0.250000" as string | null, incomeGrowth: "0.050000" as string | null },
   goals: [
@@ -386,49 +388,59 @@ describe("round trip of holdings", () => {
   });
 });
 
-describe("round trip of gold, clouds, loans and holding shares (version 4)", () => {
-  // Net worth as the engines compute it from a backup: cash + stocks/funds + gold + clouds - liabilities.
-  const wealth = (b: Backup, today: string) => {
-    const events = eventsByHolding(toHoldingEvents(b.transactions, b.corporateActions));
-    const goldPrices = b.goldPrices.map((p) => ({ date: p.date, karat: p.karat as Karat, price: p.buybackPrice, createdAt: p.createdAt }));
-    const units = b.holdings
-      .filter((h) => h.kind !== "cloud")
-      .map((h) => ({
-        id: h.id,
-        events: events.get(h.id) ?? [],
-        priceUpdates:
-          h.kind === "gold"
-            ? goldPricesFor(goldPrices, h.karat as Karat, b.settings.goldPriceMode)
-            : b.priceUpdates.filter((p) => p.holdingId === h.id),
-      }));
-    const clouds = b.holdings
-      .filter((h) => h.kind === "cloud")
-      .map((h) =>
-        cloudLine({
-          id: h.id,
-          confirmations: b.cloudConfirmations.filter((c) => c.holdingId === h.id).map((c) => ({ date: c.date, createdAt: c.createdAt, value: c.value })),
-          cashFlows: b.transactions
-            .filter((t) => t.holdingId === h.id && t.status === "posted")
-            .map((t) => ({ date: t.date, createdAt: t.createdAt, kind: t.type === "INVESTMENT_PURCHASE" ? ("deposit" as const) : ("withdrawal" as const), amount: t.amount })),
-          rates: b.rateHistory.filter((r) => r.holdingId === h.id).map((r) => ({ date: r.effectiveDate, createdAt: r.createdAt, apy: r.apy })),
-          today,
-        }),
-      );
-    const portfolio = portfolioValue(units, today, b.settings.staleDaysHoldings, clouds);
-    const cash = Object.values(balances(b)).reduce((sum, v) => sum + v, 0);
-    const liabilities = b.liabilities.reduce(
-      (sum, l) =>
-        sum +
-        outstanding(
-          l.openingBalance,
-          b.liabilityUpdates.filter((u) => u.liabilityId === l.id),
-          b.transactions.filter((t) => t.type === "LIABILITY_PAYMENT" && t.status === "posted" && t.liabilityId === l.id),
-        ),
-      0,
-    );
-    return { cash, portfolio: portfolio.total, gold: portfolio.lines.find((l) => l.id === GOLD)!.value, cloud: clouds[0].value, liabilities, netWorth: netWorth({ cash, holdings: portfolio.total, liabilities }) };
+// Net worth as the engines compute it from a backup: cash + stocks/funds + gold + clouds - liabilities.
+// Voided records are skipped as the app skips them (a void ledger row is skipped by its status).
+const wealth = (backup: Backup, today: string) => {
+  const b = {
+    ...backup,
+    priceUpdates: visibleRows(backup.priceUpdates),
+    corporateActions: visibleRows(backup.corporateActions),
+    goldPrices: visibleRows(backup.goldPrices),
+    rateHistory: visibleRows(backup.rateHistory),
+    cloudConfirmations: visibleRows(backup.cloudConfirmations),
+    liabilityUpdates: visibleRows(backup.liabilityUpdates),
   };
+  const events = eventsByHolding(toHoldingEvents(b.transactions, b.corporateActions));
+  const goldPrices = b.goldPrices.map((p) => ({ date: p.date, karat: p.karat as Karat, price: p.buybackPrice, createdAt: p.createdAt }));
+  const units = b.holdings
+    .filter((h) => h.kind !== "cloud")
+    .map((h) => ({
+      id: h.id,
+      events: events.get(h.id) ?? [],
+      priceUpdates:
+        h.kind === "gold"
+          ? goldPricesFor(goldPrices, h.karat as Karat, b.settings.goldPriceMode)
+          : b.priceUpdates.filter((p) => p.holdingId === h.id),
+    }));
+  const clouds = b.holdings
+    .filter((h) => h.kind === "cloud")
+    .map((h) =>
+      cloudLine({
+        id: h.id,
+        confirmations: b.cloudConfirmations.filter((c) => c.holdingId === h.id).map((c) => ({ date: c.date, createdAt: c.createdAt, value: c.value })),
+        cashFlows: b.transactions
+          .filter((t) => t.holdingId === h.id && t.status === "posted")
+          .map((t) => ({ date: t.date, createdAt: t.createdAt, kind: t.type === "INVESTMENT_PURCHASE" ? ("deposit" as const) : ("withdrawal" as const), amount: t.amount })),
+        rates: b.rateHistory.filter((r) => r.holdingId === h.id).map((r) => ({ date: r.effectiveDate, createdAt: r.createdAt, apy: r.apy })),
+        today,
+      }),
+    );
+  const portfolio = portfolioValue(units, today, b.settings.staleDaysHoldings, clouds);
+  const cash = Object.values(balances(b)).reduce((sum, v) => sum + v, 0);
+  const liabilities = b.liabilities.reduce(
+    (sum, l) =>
+      sum +
+      outstanding(
+        l.openingBalance,
+        b.liabilityUpdates.filter((u) => u.liabilityId === l.id),
+        b.transactions.filter((t) => t.type === "LIABILITY_PAYMENT" && t.status === "posted" && t.liabilityId === l.id),
+      ),
+    0,
+  );
+  return { cash, portfolio: portfolio.total, gold: portfolio.lines.find((l) => l.id === GOLD)!.value, cloud: clouds[0].value, liabilities, netWorth: netWorth({ cash, holdings: portfolio.total, liabilities }) };
+};
 
+describe("round trip of gold, clouds, loans and holding shares (version 4)", () => {
   it("keeps every new table and column, with decimals as strings and rates as numbers", () => {
     const backup = serializeBackup(rows, EXPORTED_AT);
     expect(backup.goldPrices.map((p) => [p.karat, p.buybackPrice])).toEqual([[21, "4400.000000"], [21, "4550.500000"], [24, "5200.000000"]]);
@@ -478,11 +490,18 @@ describe("round trip of gold, clouds, loans and holding shares (version 4)", () 
 // v3 files have no gold, clouds, liabilities or holding shares: drop them and the columns they added.
 // v4 files have no budgets, recurring templates, expense-based goal targets or budget thresholds.
 // v5 files have no portfolio targets, insight thresholds, reminder switches or income growth.
+// v6 files cannot void price updates, corporate actions, gold prices, rate changes, confirmations or loan updates.
+const VOIDABLE = ["priceUpdates", "corporateActions", "goldPrices", "rateHistory", "cloudConfirmations", "liabilityUpdates"];
+const stripV7 = (b: any) => { // eslint-disable-line @typescript-eslint/no-explicit-any
+  for (const key of VOIDABLE) for (const row of b[key]) delete row.voidedAt;
+};
+
 const V6_SETTINGS = [
   "targetStocks", "targetGold", "targetClouds", "targetCash", "insightMinPercent", "insightMinAmount",
   "remindReview", "remindRecurring", "remindStale", "remindGoal", "remindBudget", "remindSavings",
 ];
 const stripV6 = (b: any) => { // eslint-disable-line @typescript-eslint/no-explicit-any
+  stripV7(b);
   for (const key of V6_SETTINGS) delete b.settings[key];
   delete b.assumptions.incomeGrowth;
 };
@@ -680,7 +699,7 @@ describe("parseBackup rejects", () => {
       if (!result.ok) expect(result.error).toContain("JSON object");
     });
     rejects([
-      ["unknown version", (b) => (b.version = 7 as never), "version: 7 is not supported"],
+      ["unknown version", (b) => (b.version = 8 as never), "version: 8 is not supported"],
       ["fractional version", (b) => (b.version = 2.5 as never), "version: 2.5 is not supported"],
       ["version 0", (b) => (b.version = 0 as never), "version: 0 is not supported"],
       ["missing version", (b) => delete b.version, "version: undefined"],
@@ -1170,7 +1189,7 @@ describe("parseBackup rejects (version 4 additions)", () => {
 
     it("a confirmed lower value makes a later withdrawal too large", () => {
       const b = valid();
-      b.cloudConfirmations.push({ id: id(122), holdingId: CLOUD, date: "2026-03-19", value: 100_000, createdAt: "2026-03-19T09:00:00.000Z" });
+      b.cloudConfirmations.push({ id: id(122), holdingId: CLOUD, date: "2026-03-19", value: 100_000, voidedAt: null, createdAt: "2026-03-19T09:00:00.000Z" });
       expect(parseBackup(b)).toMatchObject({ ok: false });
     });
 
@@ -1532,7 +1551,7 @@ describe("parseBackup rejects (version 5 additions)", () => {
 
 describe("parseBackup rejects a liability whose balance goes below zero (opening balance plus manual updates)", () => {
   const update = (b: Backup, n: number, date: string, delta: number, createdAt = `${date}T09:00:00.000Z`) =>
-    b.liabilityUpdates.push({ id: id(n), liabilityId: LOAN, date, delta, note: null, createdAt });
+    b.liabilityUpdates.push({ id: id(n), liabilityId: LOAN, date, delta, note: null, voidedAt: null, createdAt });
 
   const owed = (b: Backup) =>
     b.liabilities[0].openingBalance + b.liabilityUpdates.filter((u) => u.liabilityId === LOAN).reduce((t, u) => t + u.delta, 0);
@@ -1700,7 +1719,7 @@ describe("transactionsToCsv", () => {
 describe("round trip of targets, insight thresholds, reminder switches and income growth (version 6)", () => {
   it("keeps every new setting, with shares as numbers and the amount in piasters", () => {
     const backup = serializeBackup(rows, EXPORTED_AT);
-    expect(backup.version).toBe(6);
+    expect(backup.version).toBe(BACKUP_VERSION);
     expect(backup.settings).toMatchObject({
       targetStocks: 0.4,
       targetGold: 0.1,
@@ -1819,5 +1838,106 @@ describe("parseBackup rejects (version 6 additions)", () => {
       b.assumptions.incomeGrowth = -0.1;
       expect(parseBackup(b).ok).toBe(true);
     });
+  });
+});
+
+describe("version 6 files", () => {
+  // v6 could not void these six kinds of record: the file has no voidedAt anywhere.
+  const v6 = () => {
+    const b = valid() as any; // eslint-disable-line @typescript-eslint/no-explicit-any
+    stripV7(b);
+    b.version = 6;
+    return b;
+  };
+
+  it("still restore, with every voidedAt null and the same net worth", () => {
+    const parsed = parseBackup(v6());
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.backup.version).toBe(BACKUP_VERSION);
+    for (const key of VOIDABLE) {
+      const list = parsed.backup[key as "priceUpdates"];
+      expect(list.length).toBeGreaterThan(0);
+      for (const row of list) expect(row.voidedAt).toBeNull();
+    }
+    expect(wealth(parsed.backup, "2026-04-30")).toEqual(wealth(valid(), "2026-04-30"));
+  });
+
+  it("ignore a voidedAt they should not have", () => {
+    const b = v6();
+    b.priceUpdates[0].voidedAt = "2026-03-30T10:00:00.000Z";
+    const parsed = parseBackup(b);
+    expect(parsed.ok && parsed.backup.priceUpdates[0].voidedAt).toBeNull();
+  });
+});
+
+describe("round trip of removed records (version 7)", () => {
+  const VOIDED_AT = at("2026-04-02T10:00:00.000Z");
+  // Six records entered by mistake and then removed. The last three would each break a rule if they still counted.
+  const removed = {
+    ...rows,
+    priceUpdates: [...rows.priceUpdates, { ...base, id: id(84), holdingId: COMI, date: "2026-03-29", price: "99.000000", voidedAt: VOIDED_AT }],
+    goldPrices: [...rows.goldPrices, { ...base, id: id(104), date: "2026-03-29", karat: 21, buybackPrice: "1.000000", voidedAt: VOIDED_AT }],
+    rateHistory: [...rows.rateHistory, { ...base, id: id(113), holdingId: CLOUD, effectiveDate: "2026-03-02", apy: "0.900000" as string | number, voidedAt: VOIDED_AT }],
+    corporateActions: [
+      ...rows.corporateActions,
+      // Would zero COMI before the sale of 40 on 03-20.
+      { ...base, id: id(93), holdingId: COMI, kind: "WRITE_OFF" as "BONUS" | "SPLIT" | "WRITE_OFF", date: "2026-03-12", quantity: null as string | null, ratio: null as string | null, note: "mistake" as string | null, voidedAt: VOIDED_AT },
+    ],
+    cloudConfirmations: [
+      ...rows.cloudConfirmations,
+      // Would make the 2,000.00 withdrawal on 03-20 larger than the cloud's value.
+      { ...base, id: id(122), holdingId: CLOUD, date: "2026-03-19", value: 0, voidedAt: VOIDED_AT },
+    ],
+    liabilityUpdates: [
+      ...rows.liabilityUpdates,
+      // Would take the loan below zero.
+      { ...base, id: id(133), liabilityId: LOAN, date: "2026-03-02", delta: -5_000_000, note: "mistake" as string | null, voidedAt: VOIDED_AT },
+    ],
+  };
+  const file = () => JSON.parse(JSON.stringify(serializeBackup(removed, EXPORTED_AT)));
+
+  it("keeps every removed record in the file, marked void, and gives it back on restore", () => {
+    const backup = serializeBackup(removed, EXPORTED_AT);
+    for (const key of VOIDABLE) {
+      const list = backup[key as "priceUpdates"];
+      expect(list.filter((r) => r.voidedAt !== null)).toHaveLength(1);
+      expect(list.filter((r) => r.voidedAt === null)).toHaveLength(rows[key as "priceUpdates"].length);
+    }
+    expect(JSON.stringify(backup)).not.toContain("user-1");
+    expect(parseBackup(JSON.parse(JSON.stringify(backup)))).toEqual({ ok: true, backup });
+  });
+
+  it("restores to the same net worth as the file that never had them", () => {
+    const parsed = parseBackup(file());
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const before = wealth(serializeBackup(rows, EXPORTED_AT), "2026-04-30");
+    expect(wealth(parsed.backup, "2026-04-30")).toEqual(before);
+    expect(wealth(serializeBackup(removed, EXPORTED_AT), "2026-04-30")).toEqual(before);
+    // Counted by mistake, the removed gold price and write-off would have changed it.
+    const counted = JSON.parse(JSON.stringify(parsed.backup)) as Backup;
+    for (const key of VOIDABLE) for (const row of counted[key as "priceUpdates"]) row.voidedAt = null;
+    expect(() => wealth(counted, "2026-04-30")).toThrow();
+  });
+
+  it.each([
+    ["a write-off that the later sale could not survive", (b: Backup) => b.corporateActions.find((c) => c.id === id(93))!],
+    ["a confirmed zero before a withdrawal", (b: Backup) => b.cloudConfirmations.find((c) => c.id === id(122))!],
+    ["a loan correction that takes the balance below zero", (b: Backup) => b.liabilityUpdates.find((u) => u.id === id(133))!],
+  ])("does not let %s block the restore while it is void, and refuses it once it counts", (_name, pick) => {
+    const b = file() as Backup;
+    expect(parseBackup(b).ok).toBe(true);
+    pick(b).voidedAt = null;
+    expect(parseBackup(b)).toMatchObject({ ok: false });
+  });
+
+  it("needs voidedAt on every record to be null or a UTC timestamp", () => {
+    const missing = file();
+    delete missing.priceUpdates[0].voidedAt;
+    expect(parseBackup(missing)).toMatchObject({ ok: false, error: expect.stringContaining("priceUpdates[0].voidedAt") });
+    const badStamp = file();
+    badStamp.goldPrices[0].voidedAt = "yesterday";
+    expect(parseBackup(badStamp)).toMatchObject({ ok: false, error: expect.stringContaining("goldPrices[0].voidedAt") });
   });
 });

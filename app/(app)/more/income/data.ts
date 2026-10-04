@@ -1,5 +1,5 @@
 import "server-only";
-import { getSettings, listAccounts, listCategories, listTransactions, toAnalyticsTx } from "@/db/queries";
+import { getSettings, listAccounts, listCategories, listHoldings, listTransactions, toAnalyticsTx } from "@/db/queries";
 import {
   change,
   DEFAULT_NOTABLE_AMOUNT,
@@ -12,7 +12,7 @@ import {
 import { filterByDateRange, periodSummary } from "@/lib/finance-core/ledger";
 import { addDays } from "@/lib/finance-core/recurring";
 import { cairoToday, financialMonth } from "@/lib/finance-core/time";
-import { firstPostedDate, toListRow } from "../../spending/data";
+import { firstPostedDate, listContext, toListRow } from "../../spending/data";
 import { pickMonth } from "../../spending/MonthNav";
 import { syncRecurring } from "../recurring/sync";
 
@@ -22,12 +22,14 @@ const thresholds = { percent: DEFAULT_NOTABLE_PERCENT, amount: DEFAULT_NOTABLE_A
 export async function loadIncome(userId: string, requested: string | string[] | undefined) {
   await syncRecurring(userId);
   const today = cairoToday();
-  const [settings, accounts, categories, allRows] = await Promise.all([
+  const [settings, accounts, categories, allRows, holdingRows] = await Promise.all([
     getSettings(userId),
     listAccounts(userId, { includeArchived: true }),
     listCategories(userId, { includeArchived: true }),
     listTransactions(userId),
+    listHoldings(userId, { includeArchived: true }),
   ]);
+  const context = listContext(holdingRows, allRows);
   const startDay = settings.monthStartDay;
   const current = financialMonth(today, startDay).start.slice(0, 7);
   const picked = pickMonth(requested, current);
@@ -76,6 +78,6 @@ export async function loadIncome(userId: string, requested: string | string[] | 
       share: g.share,
       name: g.key === null ? "No category" : (categoryName.get(g.key) ?? "Unknown"),
     })),
-    rows: allRows.filter((r) => r.date >= range.start && r.date <= range.end && INCOME_TYPES.includes(r.type)).map((r) => toListRow(r, accountName, categoryName)),
+    rows: allRows.filter((r) => r.date >= range.start && r.date <= range.end && INCOME_TYPES.includes(r.type)).map((r) => toListRow(r, accountName, categoryName, context)),
   };
 }

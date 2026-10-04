@@ -19,6 +19,9 @@ export function plain(value: string): string {
   return `${whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}${trimmed ? `.${trimmed}` : ""}`;
 }
 
+/** A NUMERIC(20,6) string as a person would type it back into a field: "12.500000" -> "12.5". No commas, no float. */
+export const typed = (value: string): string => (value.includes(".") ? value.replace(/\.?0+$/, "") : value);
+
 const ago = (days: number | null, word: string) =>
   days === null || days === 0 ? `${word} today` : `${word} ${days} ${days === 1 ? "day" : "days"} ago`;
 

@@ -6,7 +6,12 @@ import {
   addCorporateAction,
   addPriceUpdate,
   buyHolding,
+  editCorporateAction,
+  editInvestmentTransaction,
+  editPriceUpdate,
   recordDividend,
+  removeCorporateAction,
+  removePriceUpdate,
   sellHolding,
   voidInvestmentTransaction,
 } from "@/app/actions/investments";
@@ -14,8 +19,10 @@ import { KARATS } from "@/lib/finance-core/gold";
 import { parseEGP, type Piasters } from "@/lib/finance-core/money";
 import { dividendCash, purchaseCash, saleCash } from "@/lib/finance-core/portfolio";
 import { Amount } from "./Amount";
+import { RemoveButton, usableAccounts } from "./Correct";
 import { Form } from "./Form";
-import { GOLD_FORM_LABEL, KIND_LABEL } from "./HoldingFormat";
+import { egpText } from "./GoalFormat";
+import { GOLD_FORM_LABEL, KIND_LABEL, typed } from "./HoldingFormat";
 import type { AccountOption } from "./TransactionForm";
 import { Field, field, primaryBtn, secondaryBtn } from "./ui";
 
@@ -72,13 +79,29 @@ function tradeCash(buy: boolean, quantity: string, price: string, fee: string, t
   }
 }
 
-/** Buy or sell. With one holding it is fixed (holding page); with several it is picked (Quick Add). */
+/** A saved buy or sell being corrected: quantity and price as stored, fee and tax in piasters. `what` names it ("buy of 3 Oct 2026"). */
+export type TradeEditing = {
+  id: string;
+  quantity: string;
+  unitPrice: string;
+  fee: number;
+  tax: number;
+  date: string;
+  note: string | null;
+  accountId: string | null;
+  what: string;
+};
+
+const piastersText = (p: number) => (p === 0 ? "" : egpText(p));
+
+/** Buy or sell. With one holding it is fixed (holding page); with several it is picked (Quick Add). With `editing` it corrects that row. */
 export function TradeForm({
   side,
   holdings,
-  accounts,
+  accounts: allAccounts,
   today,
   autoFocus,
+  editing,
   onDone,
 }: {
   side: "buy" | "sell";
@@ -86,21 +109,23 @@ export function TradeForm({
   accounts: AccountOption[];
   today: string;
   autoFocus?: boolean;
+  editing?: TradeEditing;
   onDone?: () => void;
 }) {
   const buy = side === "buy";
+  const accounts = usableAccounts(allAccounts, editing?.accountId);
   const [holdingId, setHoldingId] = useState(holdings[0].id);
   const holding = holdings.find((h) => h.id === holdingId) ?? holdings[0];
   const gold = holding.kind === "gold";
   // Cash defaults to the holding's own account (Thndr); picking another account sticks until the holding changes.
-  const [pickedAccount, setPickedAccount] = useState<string | null>(null);
+  const [pickedAccount, setPickedAccount] = useState<string | null>(editing?.accountId ?? null);
   const wanted = pickedAccount ?? holding.accountId;
   const accountId = accounts.some((a) => a.id === wanted) ? wanted : (accounts[0]?.id ?? "");
-  const [quantity, setQuantity] = useState("");
-  const [price, setPrice] = useState("");
-  const [fee, setFee] = useState("");
-  const [tax, setTax] = useState("");
-  const [note, setNote] = useState("");
+  const [quantity, setQuantity] = useState(editing ? typed(editing.quantity) : "");
+  const [price, setPrice] = useState(editing ? typed(editing.unitPrice) : "");
+  const [fee, setFee] = useState(editing ? piastersText(editing.fee) : "");
+  const [tax, setTax] = useState(editing ? piastersText(editing.tax) : "");
+  const [note, setNote] = useState(editing?.note ?? "");
   const cash = tradeCash(buy, quantity, price, fee, tax);
 
   const clear = () => {
@@ -112,15 +137,17 @@ export function TradeForm({
   };
 
   return (
+    <>
     <Form
-      action={buy ? buyHolding : sellHolding}
+      action={editing ? editInvestmentTransaction : buy ? buyHolding : sellHolding}
       onSuccess={() => {
-        clear();
+        if (!editing) clear();
         onDone?.();
       }}
     >
       {({ pending, saved }) => (
         <>
+          {editing && <input type="hidden" name="id" value={editing.id} />}
           <HoldingPicker
             holdings={holdings}
             value={holding.id}
@@ -195,25 +222,46 @@ export function TradeForm({
             </select>
           </Field>
           <Field label="Date" className="mt-4">
-            <input type="date" name="date" required defaultValue={today} className={field} />
+            <input type="date" name="date" required defaultValue={editing?.date ?? today} className={field} />
           </Field>
           <Field label="Note (optional, no amounts)" className="mt-4">
             <input name="note" autoComplete="off" maxLength={500} value={note} onChange={(e) => setNote(e.target.value)} className={field} />
           </Field>
           <button type="submit" disabled={pending} className={`mt-6 ${primaryBtn}`}>
-            {pending ? "Saving…" : buy ? "Record purchase" : "Record sale"}
+            {pending ? "Saving…" : editing ? "Save" : buy ? "Record purchase" : "Record sale"}
           </button>
-          <Saved show={saved}>{buy ? "Purchase recorded." : "Sale recorded."}</Saved>
+          {!editing && <Saved show={saved}>{buy ? "Purchase recorded." : "Sale recorded."}</Saved>}
         </>
       )}
     </Form>
+    {editing && (
+      <RemoveButton action={voidInvestmentTransaction} id={editing.id} noun={buy ? "purchase" : "sale"} what={editing.what} onDone={onDone} />
+    )}
+    </>
   );
 }
 
-export function DividendForm({ holdingId, accountId, accounts, today }: { holdingId: string; accountId: string; accounts: AccountOption[]; today: string }) {
-  const [gross, setGross] = useState("");
-  const [tax, setTax] = useState("");
-  const [note, setNote] = useState("");
+export type DividendEditing = { id: string; gross: number; tax: number; date: string; note: string | null; accountId: string | null; what: string };
+
+export function DividendForm({
+  holdingId,
+  accountId,
+  accounts: allAccounts,
+  today,
+  editing,
+  onDone,
+}: {
+  holdingId: string;
+  accountId: string;
+  accounts: AccountOption[];
+  today: string;
+  editing?: DividendEditing;
+  onDone?: () => void;
+}) {
+  const accounts = usableAccounts(allAccounts, editing?.accountId);
+  const [gross, setGross] = useState(editing ? egpText(editing.gross) : "");
+  const [tax, setTax] = useState(editing ? piastersText(editing.tax) : "");
+  const [note, setNote] = useState(editing?.note ?? "");
   const g = parseEGP(gross);
   const t = optionalMoney(tax);
   let net: Piasters | null = null;
@@ -224,9 +272,11 @@ export function DividendForm({ holdingId, accountId, accounts, today }: { holdin
   }
 
   return (
+    <>
     <Form
-      action={recordDividend}
+      action={editing ? editInvestmentTransaction : recordDividend}
       onSuccess={() => {
+        if (editing) return onDone?.();
         setGross("");
         setTax("");
         setNote("");
@@ -234,6 +284,7 @@ export function DividendForm({ holdingId, accountId, accounts, today }: { holdin
     >
       {({ pending, saved }) => (
         <>
+          {editing && <input type="hidden" name="id" value={editing.id} />}
           <input type="hidden" name="holdingId" value={holdingId} />
           <Field label="Dividend before tax (EGP)">
             <input name="gross" {...decimalInput} required placeholder="0" value={gross} onChange={(e) => setGross(e.target.value)} className={field} />
@@ -250,7 +301,7 @@ export function DividendForm({ holdingId, accountId, accounts, today }: { holdin
             )}
           </p>
           <Field label="Cash goes to" className="mt-2">
-            <select name="accountId" defaultValue={accountId} required className={field}>
+            <select name="accountId" defaultValue={editing?.accountId ?? accountId} required className={field}>
               {accounts.map((a) => (
                 <option key={a.id} value={a.id}>
                   {a.name}
@@ -259,38 +310,46 @@ export function DividendForm({ holdingId, accountId, accounts, today }: { holdin
             </select>
           </Field>
           <Field label="Date" className="mt-4">
-            <input type="date" name="date" required defaultValue={today} className={field} />
+            <input type="date" name="date" required defaultValue={editing?.date ?? today} className={field} />
           </Field>
           <Field label="Note (optional, no amounts)" className="mt-4">
             <input name="note" autoComplete="off" maxLength={500} value={note} onChange={(e) => setNote(e.target.value)} className={field} />
           </Field>
           <button type="submit" disabled={pending} className={`mt-6 ${primaryBtn}`}>
-            {pending ? "Saving…" : "Record dividend"}
+            {pending ? "Saving…" : editing ? "Save" : "Record dividend"}
           </button>
-          <Saved show={saved}>Dividend recorded.</Saved>
+          {!editing && <Saved show={saved}>Dividend recorded.</Saved>}
         </>
       )}
     </Form>
+    {editing && <RemoveButton action={voidInvestmentTransaction} id={editing.id} noun="dividend" what={editing.what} onDone={onDone} />}
+    </>
   );
 }
 
-/** A new price for the holding. Prices are only ever added, so fixing a wrong one means adding a newer one. */
+export type PriceEditing = { id: string; price: string; date: string; what: string };
+
+/** A new price for the holding, or with `editing` a correction of a saved one. */
 export function PriceForm({
   holdings,
   today,
   autoFocus,
+  editing,
   onDone,
 }: {
   holdings: HoldingOption[];
   today: string;
   autoFocus?: boolean;
+  editing?: PriceEditing;
   onDone?: () => void;
 }) {
   const [holdingId, setHoldingId] = useState(holdings[0].id);
   return (
-    <Form action={addPriceUpdate} reset onSuccess={onDone}>
+    <>
+    <Form action={editing ? editPriceUpdate : addPriceUpdate} reset={!editing} onSuccess={onDone}>
       {({ pending, saved }) => (
         <>
+          {editing && <input type="hidden" name="id" value={editing.id} />}
           <HoldingPicker holdings={holdings} value={holdingId} onChange={setHoldingId} />
           <Field label="Price per unit now (EGP)" className={holdings.length > 1 ? "mt-4" : ""}>
             <input
@@ -300,19 +359,22 @@ export function PriceForm({
               autoFocus={autoFocus}
               data-autofocus={autoFocus ? "" : undefined}
               placeholder="0"
+              defaultValue={editing ? typed(editing.price) : undefined}
               className={field}
             />
           </Field>
           <Field label="Price date" className="mt-4">
-            <input type="date" name="date" required max={today} defaultValue={today} className={field} />
+            <input type="date" name="date" required max={today} defaultValue={editing?.date ?? today} className={field} />
           </Field>
           <button type="submit" disabled={pending} className={`mt-6 ${primaryBtn}`}>
-            {pending ? "Saving…" : "Save price"}
+            {pending ? "Saving…" : editing ? "Save" : "Save price"}
           </button>
-          <Saved show={saved}>Price saved.</Saved>
+          {!editing && <Saved show={saved}>Price saved.</Saved>}
         </>
       )}
     </Form>
+    {editing && <RemoveButton action={removePriceUpdate} id={editing.id} noun="price" what={editing.what} onDone={onDone} />}
+    </>
   );
 }
 
@@ -323,19 +385,45 @@ const ACTION_HINT = {
 } as const;
 type ActionKind = keyof typeof ACTION_HINT;
 
-export function CorporateActionForm({ holdingId, today, writeOffOnly }: { holdingId: string; today: string; writeOffOnly?: boolean }) {
+export type ActionEditing = {
+  id: string;
+  kind: ActionKind;
+  quantity: string | null;
+  ratio: string | null;
+  date: string;
+  note: string | null;
+  what: string;
+};
+
+const NOUN = { BONUS: "bonus units entry", SPLIT: "split", WRITE_OFF: "write-off" } as const;
+
+export function CorporateActionForm({
+  holdingId,
+  today,
+  writeOffOnly,
+  editing,
+  onDone,
+}: {
+  holdingId: string;
+  today: string;
+  writeOffOnly?: boolean;
+  editing?: ActionEditing;
+  onDone?: () => void;
+}) {
   // BONUS is first, so it is what a form reset returns the select to (a write-off-only form has no select).
   const first: ActionKind = writeOffOnly ? "WRITE_OFF" : "BONUS";
-  const [kind, setKind] = useState<ActionKind>(first);
+  const [kind, setKind] = useState<ActionKind>(editing?.kind ?? first);
   return (
+    <>
     <Form
-      action={addCorporateAction}
-      reset
-      onSuccess={() => setKind(first)}
-      confirm={kind === "WRITE_OFF" ? "Write this holding off? It cannot be undone, but you can record a purchase later." : undefined}
+      action={editing ? editCorporateAction : addCorporateAction}
+      reset={!editing}
+      onSuccess={() => (editing ? onDone?.() : setKind(first))}
+      confirm={kind === "WRITE_OFF" && !editing ? "Write this holding off? Units and cost go to zero. If it was a mistake, you can remove the write-off later." : undefined}
     >
       {({ pending, saved }) => (
         <>
+          {editing && <input type="hidden" name="id" value={editing.id} />}
           <input type="hidden" name="holdingId" value={holdingId} />
           {writeOffOnly ? (
             <input type="hidden" name="kind" value="WRITE_OFF" />
@@ -351,27 +439,43 @@ export function CorporateActionForm({ holdingId, today, writeOffOnly }: { holdin
           <p className="mt-2 text-sm text-muted">{writeOffOnly ? "Lost or worthless. Grams and cost go to zero, and the remaining cost is recorded as a loss." : ACTION_HINT[kind]}</p>
           {kind === "BONUS" && (
             <Field label="Bonus units received" className="mt-4">
-              <input name="quantity" {...decimalInput} required placeholder="0" className={field} />
+              <input
+                name="quantity"
+                {...decimalInput}
+                required
+                placeholder="0"
+                defaultValue={editing?.quantity ? typed(editing.quantity) : undefined}
+                className={field}
+              />
             </Field>
           )}
           {kind === "SPLIT" && (
             <Field label="Split ratio (2 for 2-for-1, 0.5 for a reverse split)" className="mt-4">
-              <input name="ratio" {...decimalInput} required placeholder="2" className={field} />
+              <input
+                name="ratio"
+                {...decimalInput}
+                required
+                placeholder="2"
+                defaultValue={editing?.ratio ? typed(editing.ratio) : undefined}
+                className={field}
+              />
             </Field>
           )}
           <Field label="Date" className="mt-4">
-            <input type="date" name="date" required defaultValue={today} className={field} />
+            <input type="date" name="date" required defaultValue={editing?.date ?? today} className={field} />
           </Field>
           <Field label="Note (optional, no amounts)" className="mt-4">
-            <input name="note" autoComplete="off" maxLength={500} className={field} />
+            <input name="note" autoComplete="off" maxLength={500} defaultValue={editing?.note ?? ""} className={field} />
           </Field>
           <button type="submit" disabled={pending} className={`mt-6 ${primaryBtn}`}>
-            {pending ? "Saving…" : "Record"}
+            {pending ? "Saving…" : editing ? "Save" : "Record"}
           </button>
-          <Saved show={saved}>Recorded.</Saved>
+          {!editing && <Saved show={saved}>Recorded.</Saved>}
         </>
       )}
     </Form>
+    {editing && <RemoveButton action={removeCorporateAction} id={editing.id} noun={NOUN[editing.kind]} what={editing.what} onDone={onDone} />}
+    </>
   );
 }
 
@@ -420,7 +524,7 @@ export function AddHoldingForm({ accounts, today }: { accounts: { id: string; na
                   ))}
                 </select>
               </Field>
-              <p className="mt-2 text-sm text-muted">The karat cannot be changed later. Add one holding per karat.</p>
+              <p className="mt-2 text-sm text-muted">Add one holding per karat. You can fix the karat later in the holding&apos;s details.</p>
             </>
           )}
           {cloud && (
@@ -469,8 +573,32 @@ export function AddHoldingForm({ accounts, today }: { accounts: { id: string; na
   );
 }
 
-/** `ticker` undefined hides the ticker field (gold and Savings Clouds have none). */
-export function HoldingEditForm({ id, name, ticker, notes }: { id: string; name: string; ticker?: string | null; notes: string | null }) {
+export type CloudDetails = {
+  startDate: string | null;
+  maturityDate: string | null;
+  contributionAmount: number | null;
+  contributionFrequency: "weekly" | "monthly" | null;
+};
+
+/**
+ * `ticker` undefined hides the ticker field (gold and Savings Clouds have none). `gold` adds the karat and form,
+ * `cloud` the dates and planned contribution: details fixed when the holding was added, which a person can get wrong.
+ */
+export function HoldingEditForm({
+  id,
+  name,
+  ticker,
+  notes,
+  gold,
+  cloud,
+}: {
+  id: string;
+  name: string;
+  ticker?: string | null;
+  notes: string | null;
+  gold?: { karat: number | null; form: keyof typeof GOLD_FORM_LABEL | null };
+  cloud?: CloudDetails;
+}) {
   return (
     <Form action={updateHolding}>
       {({ pending, saved }) => (
@@ -483,6 +611,56 @@ export function HoldingEditForm({ id, name, ticker, notes }: { id: string; name:
             <Field label="Ticker (optional)" className="mt-4">
               <input name="ticker" autoComplete="off" maxLength={20} defaultValue={ticker ?? ""} className={field} />
             </Field>
+          )}
+          {gold && (
+            <>
+              <Field label="Karat" className="mt-4">
+                <select name="karat" defaultValue={String(gold.karat ?? 21)} className={field}>
+                  {KARATS.map((k) => (
+                    <option key={k} value={k}>
+                      {k}K
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Form" className="mt-4">
+                <select name="form" defaultValue={gold.form ?? "bar"} className={field}>
+                  {Object.entries(GOLD_FORM_LABEL).map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <p className="mt-2 text-sm text-muted">Changing the karat values this gold at that karat&apos;s price. Your purchases stay as they are.</p>
+            </>
+          )}
+          {cloud && (
+            <>
+              <Field label="Start date" className="mt-4">
+                <input type="date" name="startDate" required defaultValue={cloud.startDate ?? ""} className={field} />
+              </Field>
+              <Field label="Maturity date (optional)" className="mt-4">
+                <input type="date" name="maturityDate" defaultValue={cloud.maturityDate ?? ""} className={field} />
+              </Field>
+              <Field label="Planned contribution (EGP, optional)" className="mt-4">
+                <input
+                  name="contributionAmount"
+                  {...decimalInput}
+                  placeholder="0"
+                  defaultValue={cloud.contributionAmount === null ? "" : egpText(cloud.contributionAmount)}
+                  className={field}
+                />
+              </Field>
+              <Field label="How often" className="mt-4">
+                <select name="contributionFrequency" defaultValue={cloud.contributionFrequency ?? ""} className={field}>
+                  <option value="">Not set</option>
+                  <option value="weekly">Every week</option>
+                  <option value="monthly">Every month</option>
+                </select>
+              </Field>
+              <p className="mt-2 text-sm text-muted">The contribution only feeds the expected value. It does not record any money moving.</p>
+            </>
           )}
           <Field label="Notes (optional, no amounts)" className="mt-4">
             <input name="notes" autoComplete="off" maxLength={1000} defaultValue={notes ?? ""} className={field} />
@@ -506,23 +684,6 @@ export function HoldingArchiveButton({ id, archived, canArchive }: { id: string;
           <input type="hidden" name="id" value={id} />
           <button type="submit" disabled={pending || (!archived && !canArchive)} className={`w-full ${secondaryBtn}`}>
             {pending ? "Saving…" : archived ? "Restore holding" : "Archive holding"}
-          </button>
-        </>
-      )}
-    </Form>
-  );
-}
-
-/** `what` names the entry ("buy of 3 Jan") so the Void buttons of a history list can be told apart. */
-export function HoldingVoidButton({ id, what }: { id: string; what: string }) {
-  return (
-    <Form action={voidInvestmentTransaction} confirm="Void this? It stays in your history but stops counting, and your cash balance is corrected.">
-      {({ pending }) => (
-        <>
-          <input type="hidden" name="id" value={id} />
-          <button type="submit" disabled={pending} className="min-h-11 rounded-xl px-3 text-sm font-medium text-negative disabled:opacity-60">
-            {pending ? "Voiding…" : "Void"}
-            <span className="sr-only"> {what}</span>
           </button>
         </>
       )}

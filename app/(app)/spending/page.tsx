@@ -154,8 +154,9 @@ export default async function Page({ searchParams }: { searchParams: Promise<{ m
 
       <section aria-labelledby="transactions-heading" className="mt-8">
         <h2 id="transactions-heading" className={h2}>
-          Transactions
+          Everything you recorded
         </h2>
+        <p className="text-sm text-muted">Income, spending, transfers and investments for this month.</p>
         <TransactionList
           rows={d.rows}
           accounts={d.accounts.map((a) => ({ id: a.id, name: a.name, archived: a.archivedAt !== null }))}

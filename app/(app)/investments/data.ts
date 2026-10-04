@@ -5,6 +5,8 @@ import {
   type PortfolioData,
   type PortfolioHoldingRow,
   type RateHistoryEntry,
+  type RemovedRecords,
+  type TransactionRow,
   type WealthData,
 } from "@/db/queries";
 import { cloudProjection } from "@/lib/finance-core/clouds";
@@ -170,60 +172,101 @@ export function holdingsByAccount(inv: Investments): Map<string, Piasters> {
 /** A brokerage account is worth its cash plus what it holds. */
 export const accountValue = (cash: Piasters, holdings: Piasters): Piasters => netWorth({ cash, holdings, liabilities: 0 });
 
-type Base = { key: string; date: string; createdAt: string; note: string | null };
+type Base = { key: string; date: string; createdAt: string; note: string | null; removed: boolean };
+/** The cash account of a ledger row, so its correction form can keep it. */
+type Cash = { txId: string; accountId: string | null };
 export type HistoryEntry = Base &
   (
-    | { kind: "buy"; txId: string; quantity: string; price: string; amount: Piasters; fee: Piasters }
-    | { kind: "sell"; txId: string; quantity: string; price: string; amount: Piasters; fee: Piasters; tax: Piasters }
-    | { kind: "dividend"; txId: string; amount: Piasters; gross: Piasters; tax: Piasters }
-    | { kind: "deposit"; txId: string; amount: Piasters }
-    | { kind: "withdrawal"; txId: string; amount: Piasters }
+    | ({ kind: "buy"; quantity: string; price: string; amount: Piasters; fee: Piasters } & Cash)
+    | ({ kind: "sell"; quantity: string; price: string; amount: Piasters; fee: Piasters; tax: Piasters } & Cash)
+    | ({ kind: "dividend"; amount: Piasters; gross: Piasters; tax: Piasters } & Cash)
+    | ({ kind: "deposit"; amount: Piasters } & Cash)
+    | ({ kind: "withdrawal"; amount: Piasters } & Cash)
     | { kind: "rate"; apy: number }
     | { kind: "confirmed"; value: Piasters }
     | { kind: "bonus"; quantity: string }
     | { kind: "split"; ratio: string }
     | { kind: "writeOff" }
-    | { kind: "price"; price: string }
+    /** `id` is null for a gold price: those are shared, listed and corrected on the Investments page. */
+    | { kind: "price"; id: string | null; price: string }
   );
 
-/** One holding's posted trades, corporate actions, price updates, rate changes and confirmations, newest first. Voided rows are not in it. */
-export function holdingHistory(portfolio: PortfolioData, holdingId: string, prices: PriceUpdate[]): HistoryEntry[] {
+/** What was removed from one holding's history: voided ledger rows and the voided records of the six correctable tables. */
+export type RemovedHistory = { trades: TransactionRow[]; records: RemovedRecords };
+
+/** Every voided holding ledger row of the user, plus the removed records; holdingHistory picks the holding's own. */
+export const removedHistory = (allTransactions: TransactionRow[], records: RemovedRecords): RemovedHistory => ({
+  trades: allTransactions.filter((t) => t.holdingId !== null && t.status === "void"),
+  records,
+});
+
+function tradeEntry(t: TransactionRow, removed: boolean): HistoryEntry | null {
+  const base = { key: t.id, txId: t.id, accountId: t.fromAccountId ?? t.toAccountId, date: t.date, createdAt: t.createdAt.toISOString(), note: t.note, removed };
+  if (t.type === "INVESTMENT_PURCHASE") {
+    return t.quantity === null
+      ? { ...base, kind: "deposit", amount: t.amount }
+      : { ...base, kind: "buy", quantity: t.quantity, price: t.unitPrice!, amount: t.amount, fee: t.fee };
+  }
+  if (t.type === "INVESTMENT_SALE") {
+    return t.quantity === null
+      ? { ...base, kind: "withdrawal", amount: t.amount }
+      : { ...base, kind: "sell", quantity: t.quantity, price: t.unitPrice!, amount: t.amount, fee: t.fee, tax: t.taxWithheld ?? 0 };
+  }
+  if (t.type === "DIVIDEND") return { ...base, kind: "dividend", amount: t.amount, gross: t.grossAmount ?? t.amount, tax: t.taxWithheld ?? 0 };
+  return null;
+}
+
+function actionEntry(a: PortfolioData["corporateActions"][number], removed: boolean): HistoryEntry {
+  const base = { key: a.id, date: a.date, createdAt: a.createdAt.toISOString(), note: a.note, removed };
+  if (a.kind === "BONUS") return { ...base, kind: "bonus", quantity: a.quantity! };
+  if (a.kind === "SPLIT") return { ...base, kind: "split", ratio: a.ratio! };
+  return { ...base, kind: "writeOff" };
+}
+
+/**
+ * One holding's posted trades, corporate actions, price updates, rate changes and confirmations, newest first. Removed
+ * entries come in flagged `removed` when `removed` is given: the list hides them behind "Show removed" and nothing counts them.
+ * `prices` carry an id for a stock or fund; a gold row's prices are the shared ones and cannot be corrected here.
+ */
+export function holdingHistory(
+  portfolio: PortfolioData,
+  holdingId: string,
+  prices: { id?: string; date: string; price: string; createdAt: string }[],
+  removed?: RemovedHistory,
+): HistoryEntry[] {
   const out: HistoryEntry[] = [];
-  for (const t of portfolio.trades) {
-    if (t.holdingId !== holdingId) continue;
-    const base = { key: t.id, txId: t.id, date: t.date, createdAt: t.createdAt.toISOString(), note: t.note };
-    if (t.type === "INVESTMENT_PURCHASE") {
-      out.push(
-        t.quantity === null
-          ? { ...base, kind: "deposit", amount: t.amount }
-          : { ...base, kind: "buy", quantity: t.quantity, price: t.unitPrice!, amount: t.amount, fee: t.fee },
-      );
-    } else if (t.type === "INVESTMENT_SALE") {
-      out.push(
-        t.quantity === null
-          ? { ...base, kind: "withdrawal", amount: t.amount }
-          : { ...base, kind: "sell", quantity: t.quantity, price: t.unitPrice!, amount: t.amount, fee: t.fee, tax: t.taxWithheld ?? 0 },
-      );
-    } else if (t.type === "DIVIDEND") {
-      out.push({ ...base, kind: "dividend", amount: t.amount, gross: t.grossAmount ?? t.amount, tax: t.taxWithheld ?? 0 });
+  const mine = (id: string) => id === holdingId;
+  for (const [rows, gone] of [[portfolio.trades, false], [removed?.trades ?? [], true]] as const) {
+    for (const t of rows) {
+      const e = mine(t.holdingId ?? "") ? tradeEntry(t, gone) : null;
+      if (e) out.push(e);
     }
   }
-  for (const a of portfolio.corporateActions) {
-    if (a.holdingId !== holdingId) continue;
-    const base = { key: a.id, date: a.date, createdAt: a.createdAt.toISOString(), note: a.note };
-    if (a.kind === "BONUS") out.push({ ...base, kind: "bonus", quantity: a.quantity! });
-    else if (a.kind === "SPLIT") out.push({ ...base, kind: "split", ratio: a.ratio! });
-    else out.push({ ...base, kind: "writeOff" });
+  for (const [rows, gone] of [[portfolio.corporateActions, false], [removed?.records.corporateActions ?? [], true]] as const) {
+    for (const a of rows) if (mine(a.holdingId)) out.push(actionEntry(a, gone));
   }
-  for (const r of portfolio.rateHistory) {
-    if (r.holdingId === holdingId) out.push({ key: r.id, date: r.date, createdAt: r.createdAt, note: null, kind: "rate", apy: r.apy });
+  for (const [rows, gone] of [[portfolio.rateHistory, false], [removed?.records.rateHistory ?? [], true]] as const) {
+    for (const r of rows) {
+      if (mine(r.holdingId)) out.push({ key: r.id, date: r.date, createdAt: r.createdAt, note: null, removed: gone, kind: "rate", apy: r.apy });
+    }
   }
-  for (const c of portfolio.confirmations) {
-    if (c.holdingId === holdingId) out.push({ key: c.id, date: c.date, createdAt: c.createdAt, note: null, kind: "confirmed", value: c.value });
+  for (const [rows, gone] of [[portfolio.confirmations, false], [removed?.records.confirmations ?? [], true]] as const) {
+    for (const c of rows) {
+      if (mine(c.holdingId)) out.push({ key: c.id, date: c.date, createdAt: c.createdAt, note: null, removed: gone, kind: "confirmed", value: c.value });
+    }
   }
-  for (const p of prices) {
-    out.push({ key: `price-${p.date}-${p.createdAt}`, date: p.date, createdAt: p.createdAt, note: null, kind: "price", price: p.price });
-  }
+  const priceEntry = (p: { id?: string; date: string; price: string; createdAt: string }, gone: boolean): HistoryEntry => ({
+    key: p.id ?? `price-${p.date}-${p.createdAt}`,
+    date: p.date,
+    createdAt: p.createdAt,
+    note: null,
+    removed: gone,
+    kind: "price",
+    id: p.id ?? null,
+    price: p.price,
+  });
+  for (const p of prices) out.push(priceEntry(p, false));
+  for (const p of removed?.records.priceUpdates ?? []) if (mine(p.holdingId)) out.push(priceEntry(p, true));
   return out.sort((a, b) =>
     a.date !== b.date ? (a.date < b.date ? 1 : -1) : a.createdAt === b.createdAt ? 0 : a.createdAt < b.createdAt ? 1 : -1,
   );
