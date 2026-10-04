@@ -92,11 +92,12 @@ function Control({
           value={text}
           onChange={(e) => onText(e.target.value)}
           aria-invalid={invalid}
+          aria-describedby={invalid ? `${id}-error` : undefined}
           className={`${field} mt-0 w-28 shrink-0`}
         />
       </div>
       {invalid && (
-        <p role="alert" className="text-sm text-negative">
+        <p id={`${id}-error`} role="alert" className="text-sm text-negative">
           That is not a usable number. The results below still use the last good one.
         </p>
       )}

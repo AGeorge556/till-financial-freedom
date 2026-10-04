@@ -157,7 +157,7 @@ export function TransactionForm({
                           defaultChecked={c.id === initial?.categoryId}
                           className="peer sr-only"
                         />
-                        <span className="flex min-h-11 items-center rounded-full border border-border px-4 text-sm peer-checked:border-foreground peer-checked:bg-foreground peer-checked:text-background peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-foreground">
+                        <span className="flex min-h-11 items-center rounded-full border border-control px-4 text-sm peer-checked:border-foreground peer-checked:bg-foreground peer-checked:text-background peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-foreground">
                           {c.name}
                           {c.archived ? " (archived)" : ""}
                         </span>
@@ -191,7 +191,7 @@ export function TransactionForm({
               <input type="date" name="date" required defaultValue={initial?.date ?? today} className={field} />
             </Field>
             <Field label="Note (optional)" className="mt-5">
-              <input name="note" maxLength={500} defaultValue={initial?.note ?? ""} className={field} />
+              <input name="note" autoComplete="off" maxLength={500} defaultValue={initial?.note ?? ""} className={field} />
             </Field>
 
             <button type="submit" disabled={pending} className={`mt-6 ${primaryBtn}`}>

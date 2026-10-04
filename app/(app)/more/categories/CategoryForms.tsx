@@ -50,7 +50,7 @@ export function CategoryRow({ id, name, isEssential, isExpense }: { id: string; 
           <>
             <input type="hidden" name="id" value={id} />
             <input
-              name="name"
+              name="name" autoComplete="off"
               aria-label="Category name"
               required
               maxLength={80}
@@ -58,7 +58,8 @@ export function CategoryRow({ id, name, isEssential, isExpense }: { id: string; 
               className={`${field} mt-0 min-w-0 flex-1`}
             />
             <button type="submit" disabled={pending} className={secondaryBtn}>
-              {saved ? "Saved" : "Rename"}
+              {pending ? "Renaming…" : saved ? "Saved" : "Rename"}
+              <span className="sr-only"> {name}</span>
             </button>
           </>
         )}
@@ -78,7 +79,7 @@ export function CategoryRow({ id, name, isEssential, isExpense }: { id: string; 
                     onChange={(e) => e.currentTarget.form?.requestSubmit()}
                     className="size-5"
                   />
-                  Essential
+                  Essential<span className="sr-only"> {name}</span>
                 </label>
               </>
             )}
@@ -94,7 +95,8 @@ export function CategoryRow({ id, name, isEssential, isExpense }: { id: string; 
             <>
               <input type="hidden" name="id" value={id} />
               <button type="submit" disabled={pending} className="min-h-11 px-2 text-sm text-muted underline disabled:opacity-60">
-                Archive
+                {pending ? "Archiving…" : "Archive"}
+                <span className="sr-only"> {name}</span>
               </button>
             </>
           )}

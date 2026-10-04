@@ -61,7 +61,7 @@ export function CloudFlowForm({
             <input type="date" name="date" required max={today} defaultValue={today} className={field} />
           </Field>
           <Field label="Note (optional, no amounts)" className="mt-4">
-            <input name="note" maxLength={500} className={field} />
+            <input name="note" autoComplete="off" maxLength={500} className={field} />
           </Field>
           <button type="submit" disabled={pending} className={`mt-6 ${primaryBtn}`}>
             {pending ? "Saving…" : deposit ? "Record deposit" : "Record withdrawal"}

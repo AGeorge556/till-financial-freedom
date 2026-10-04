@@ -62,7 +62,7 @@ function RecurringFields({
                 onChange={() => setType(t)}
                 className="peer sr-only"
               />
-              <span className="flex min-h-11 items-center justify-center rounded-xl border border-border text-sm peer-checked:border-foreground peer-checked:bg-foreground peer-checked:text-background peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-foreground">
+              <span className="flex min-h-11 items-center justify-center rounded-xl border border-control text-sm peer-checked:border-foreground peer-checked:bg-foreground peer-checked:text-background peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-foreground">
                 {t === "EXPENSE" ? "Expense (a bill)" : "Income"}
               </span>
             </label>
@@ -199,7 +199,11 @@ export function EditRecurringButton({
   today: string;
 }) {
   return (
-    <GoalSheet trigger="Edit" title={`Edit ${item.name}`} className={secondaryBtn}>
+    <GoalSheet
+      trigger={<>Edit<span className="sr-only"> {item.name}</span></>}
+      title={`Edit ${item.name}`}
+      className={secondaryBtn}
+    >
       {(close) => (
         <Form action={updateTemplate} onSuccess={close}>
           {({ pending }) => (

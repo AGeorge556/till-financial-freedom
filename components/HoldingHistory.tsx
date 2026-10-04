@@ -124,7 +124,7 @@ export function HoldingHistory({ entries, gold = false }: { entries: HistoryEntr
               {e.note ? ` · ${e.note}` : ""}
             </p>
             {detail && <p className="text-sm text-muted">{detail}</p>}
-            {voidable && <HoldingVoidButton id={e.txId} />}
+            {voidable && <HoldingVoidButton id={e.txId} what={`${e.kind} of ${dateText(e.date)}`} />}
           </li>
         );
       })}

@@ -60,7 +60,7 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
               {here.map((h) => (
                 <li key={h.id}>
                   <Link href={`/investments/${h.id}`} className="flex min-h-14 items-center justify-between gap-3 px-4 py-2">
-                    <span className="truncate font-medium">{h.name}</span>
+                    <span className="break-words font-medium">{h.name}</span>
                     <Amount value={h.value} className="shrink-0" />
                   </Link>
                 </li>

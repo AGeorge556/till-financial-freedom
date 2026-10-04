@@ -91,7 +91,7 @@ export default async function Page() {
               <li key={t.id} className="px-4 py-3">
                 <div className="flex items-start justify-between gap-3">
                   <span className="min-w-0">
-                    <span className={`block truncate font-medium ${t.active ? "" : "text-muted"}`}>
+                    <span className={`block break-words font-medium ${t.active ? "" : "text-muted"}`}>
                       {t.name}
                       {!t.active && (
                         <span className="ml-2 rounded-full border border-border px-2 py-0.5 align-middle text-xs font-normal">Paused</span>

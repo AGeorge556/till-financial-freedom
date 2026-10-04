@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import type { ReactNode } from "react";
 import { Amount } from "@/components/Amount";
@@ -10,6 +11,7 @@ import { GoalPlanCard } from "@/components/GoalPlanCard";
 import { InsightList } from "@/components/InsightList";
 import { ReminderList } from "@/components/ReminderList";
 import { card } from "@/components/ui";
+import { Wide } from "@/components/Wide";
 import {
   accountBalances,
   classValues,
@@ -33,6 +35,8 @@ import { loadGoalData } from "./goals/data";
 import { loadInvestments } from "./investments/data";
 import { syncRecurring } from "./more/recurring/sync";
 import { loadBudgetLines } from "./spending/data";
+
+export const metadata: Metadata = { title: "Home" };
 
 const MAX_INSIGHTS = 5;
 const block = "mb-6 break-inside-avoid";
@@ -108,12 +112,12 @@ export default async function Home() {
   const reminders = buildReminders(reminderInput, switches, today);
 
   return (
-    <div className="md:relative md:left-1/2 md:w-[clamp(100%,calc(100vw_-_18rem),60rem)] md:-translate-x-1/2">
+    <Wide>
       <h1 className="text-3xl font-semibold tracking-tight">Home</h1>
-      <div className="mt-8 md:columns-2 md:gap-6">
+      <div className="mt-8 lg:columns-2 lg:gap-6">
         <section className={block}>
-          <p className="text-sm text-muted">Net worth</p>
-          <Amount value={total} className="mt-1 block text-4xl font-semibold tracking-tight md:text-3xl lg:text-4xl" />
+          <h2 className="text-sm font-normal text-muted">Net worth</h2>
+          <Amount value={total} className="mt-1 block text-4xl font-semibold tracking-tight lg:text-3xl xl:text-4xl" />
           <dl className="mt-4 grid grid-cols-2 gap-4">
             <div className="border-l-2 border-cash pl-3">
               <dt className="text-sm text-muted">Cash</dt>
@@ -190,7 +194,13 @@ export default async function Home() {
             <div className="mb-2 flex items-baseline justify-between gap-3">
               <h3 className="text-sm text-muted">Monthly budget</h3>
               <Link href={overallBudget ? "/spending" : "/more/budgets"} className={linkBtn}>
-                {overallBudget ? "Details" : "Set a budget"}
+                {overallBudget ? (
+                  <>
+                    Details<span className="sr-only"> of your monthly budget</span>
+                  </>
+                ) : (
+                  "Set a budget"
+                )}
               </Link>
             </div>
             {overallBudget ? (
@@ -242,7 +252,13 @@ export default async function Home() {
           <div className="mb-3 flex items-baseline justify-between gap-3">
             <h2 className="text-lg font-semibold tracking-tight">Portfolio</h2>
             <Link href="/investments" className={linkBtn}>
-              {hasHoldings ? "Open" : "Add a holding"}
+              {hasHoldings ? (
+                <>
+                  Open<span className="sr-only"> investments</span>
+                </>
+              ) : (
+                "Add a holding"
+              )}
             </Link>
           </div>
           <MixChart mix={mix(values)} />
@@ -263,6 +279,6 @@ export default async function Home() {
           />
         </div>
       </div>
-    </div>
+    </Wide>
   );
 }

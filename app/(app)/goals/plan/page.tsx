@@ -25,7 +25,7 @@ export default async function Page() {
       <p className="mt-1 text-muted">{formatRange(month.start, month.end)}</p>
 
       <section className={`mt-6 p-5 ${card}`}>
-        <dl className="grid grid-cols-3 gap-3">
+        <dl className="grid grid-cols-[repeat(auto-fit,minmax(9rem,1fr))] gap-3">
           <div>
             <dt className="text-sm text-muted">Income</dt>
             <dd className="font-medium">
@@ -126,6 +126,11 @@ export default async function Page() {
                     </div>
                   </dl>
                 )}
+                {outcome && outcome.shortfall > 0 && (
+                  <p className="mt-1 text-sm text-negative">
+                    ▲ Short by <Amount value={outcome.shortfall} />
+                  </p>
+                )}
                 {overrideAmount !== null && (
                   <p className="mt-1 text-sm text-muted">
                     Changed for this month only (the rule stays as it is).
@@ -133,8 +138,8 @@ export default async function Page() {
                 )}
                 {outcome && (
                   <div className="mt-2 flex flex-wrap gap-2">
-                    <OverrideButton ruleId={rule.id} month={data.monthKey} planned={outcome.planned} />
-                    {overrideAmount !== null && <ClearOverrideButton ruleId={rule.id} month={data.monthKey} />}
+                    <OverrideButton ruleId={rule.id} month={data.monthKey} planned={outcome.planned} name={ruleTargetName(rule.targetKind, goalName)} />
+                    {overrideAmount !== null && <ClearOverrideButton ruleId={rule.id} month={data.monthKey} name={ruleTargetName(rule.targetKind, goalName)} />}
                   </div>
                 )}
               </li>

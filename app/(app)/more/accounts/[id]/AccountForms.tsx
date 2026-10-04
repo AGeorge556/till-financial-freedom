@@ -28,13 +28,13 @@ export function EditAccountForm({
         <>
           <input type="hidden" name="id" value={id} />
           <Field label="Name">
-            <input name="name" required maxLength={80} defaultValue={name} className={field} />
+            <input name="name" autoComplete="off" required maxLength={80} defaultValue={name} className={field} />
           </Field>
           <Field label="Bank or provider (optional)" className="mt-4">
-            <input name="institution" defaultValue={institution ?? ""} className={field} />
+            <input name="institution" autoComplete="off" defaultValue={institution ?? ""} className={field} />
           </Field>
           <Field label="Notes (optional)" className="mt-4">
-            <input name="notes" defaultValue={notes ?? ""} className={field} />
+            <input name="notes" autoComplete="off" defaultValue={notes ?? ""} className={field} />
           </Field>
           <button type="submit" disabled={pending} className={`mt-5 ${primaryBtn}`}>
             {pending ? "Saving…" : "Save changes"}
@@ -77,7 +77,7 @@ export function ArchiveButton({ id, archived }: { id: string; archived: boolean 
         <>
           <input type="hidden" name="id" value={id} />
           <button type="submit" disabled={pending} className={`w-full ${secondaryBtn}`}>
-            {archived ? "Unarchive account" : "Archive account"}
+            {pending ? "Saving…" : archived ? "Unarchive account" : "Archive account"}
           </button>
         </>
       )}

@@ -2,6 +2,7 @@
 
 import { useActionState } from "react";
 import { importBackup, type ImportState } from "@/app/actions/backup";
+import { BackLink } from "@/components/ui";
 
 const link = "flex min-h-11 items-center justify-center rounded-xl border border-border bg-surface px-4 font-medium";
 
@@ -10,6 +11,7 @@ export default function Page() {
 
   return (
     <>
+      <BackLink href="/more">More</BackLink>
       <h1 className="text-3xl font-semibold tracking-tight">Backup</h1>
       <p className="mt-2 text-muted">
         The backup is a file with every account, category and transaction, including voided ones. Keep a copy
@@ -39,7 +41,9 @@ export default function Page() {
           type="file"
           accept=".json"
           required
-          className="mt-2 block min-h-11 w-full rounded-xl border border-border bg-surface px-4 py-2"
+          aria-describedby={state.error ? "restore-error" : undefined}
+          aria-invalid={state.error ? true : undefined}
+          className="mt-2 block min-h-11 w-full rounded-xl border border-control bg-surface px-4 py-2"
         />
         <button
           type="submit"
@@ -50,17 +54,13 @@ export default function Page() {
         </button>
       </form>
 
-      {state.error && (
-        <p role="alert" className="mt-4 text-negative">
-          {state.error}
-        </p>
-      )}
-      {state.imported && (
-        <p role="status" className="mt-4 text-positive">
-          Restored {state.imported.accounts} accounts, {state.imported.categories} categories and{" "}
-          {state.imported.transactions} transactions.
-        </p>
-      )}
+      <p id="restore-error" role="alert" className={state.error ? "mt-4 text-negative" : "sr-only"}>
+        {state.error}
+      </p>
+      <p role="status" className={state.imported ? "mt-4 text-positive" : "sr-only"}>
+        {state.imported &&
+          `Restored ${state.imported.accounts} accounts, ${state.imported.categories} categories and ${state.imported.transactions} transactions.`}
+      </p>
     </>
   );
 }

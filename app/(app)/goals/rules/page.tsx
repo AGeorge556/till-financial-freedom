@@ -62,7 +62,7 @@ export default async function Page() {
                 ? "Enter your expected income and spending so the plan has something to work with. You have fewer than 3 full months of history."
                 : "Your plan uses the figures you entered, because you have fewer than 3 full months of history. It switches to the average of your actual months once you do."}
           </p>
-          <dl className="mt-4 grid grid-cols-3 gap-3">
+          <dl className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(9rem,1fr))] gap-3">
             <div>
               <dt className="text-sm text-muted">Income</dt>
               <dd className="font-medium">
@@ -139,6 +139,7 @@ export default async function Page() {
                 <div className="mt-2 flex flex-wrap gap-2">
                   <RuleButton
                     goals={goalOptions}
+                    name={ruleTargetName(rule.targetKind, goalName)}
                     rule={{
                       id: rule.id,
                       kind: rule.kind,
@@ -148,7 +149,7 @@ export default async function Page() {
                       percent: rule.percent,
                     }}
                   />
-                  <DeleteRuleButton id={rule.id} />
+                  <DeleteRuleButton id={rule.id} name={ruleTargetName(rule.targetKind, goalName)} />
                 </div>
               </li>
             ))}

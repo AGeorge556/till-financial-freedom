@@ -29,7 +29,7 @@ const quiet = (over: Partial<InsightInput> = {}): InsightInput => ({
   mix: mix({ stocks: 0, gold: 0, clouds: 0, cash: 0 }),
   budgets: [],
   stale: { count: 0, value: 0 },
-  pending: { count: 0, total: 0 },
+  pending: { count: 0, expense: 0, income: 0 },
   ...over,
 });
 
@@ -128,7 +128,7 @@ describe("the 2-full-months rule", () => {
       mix: mix({ stocks: egp(50), gold: 0, clouds: 0, cash: egp(50) }),
       budgets: [{ id: "b", name: "Food", status: { level: "warn", budget: egp(1_000), spent: egp(850), percentUsed: 0.85, projected: egp(1_200) } }],
       stale: { count: 1, value: egp(100) },
-      pending: { count: 2, total: egp(300) },
+      pending: { count: 2, expense: egp(300), income: 0 },
     });
     expect(new Set(kinds(buildInsights(early)))).toEqual(new Set(["goal-late", "investment-share", "budget", "stale-values", "pending-recurring"]));
   });
@@ -272,9 +272,33 @@ describe("stale values and pending items", () => {
     const [one] = buildInsights(quiet({ stale: { count: 1, value: egp(2_000) } }));
     expect(one).toMatchObject({ kind: "stale-values", impact: egp(2_000) });
     expect(one.text[0]).toEqual({ text: "1 investment value is out of date, together worth about " });
-    const [many] = buildInsights(quiet({ pending: { count: 3, total: egp(900) } }));
+    const [many] = buildInsights(quiet({ pending: { count: 3, expense: egp(900), income: 0 } }));
     expect(many).toMatchObject({ kind: "pending-recurring", impact: egp(900) });
-    expect(many.text[0]).toEqual({ text: "3 recurring items are waiting for you to confirm, " });
+    expect(many.text[0]).toEqual({ text: "3 recurring items are waiting for you to confirm" });
+  });
+
+  it("pending items: expense and income are separate amounts, never added, and rank by the expense total", () => {
+    const [both] = buildInsights(quiet({ pending: { count: 2, expense: egp(900), income: egp(5_000) } }));
+    expect(both.impact).toBe(egp(900));
+    expect(both.text).toEqual([
+      { text: "2 recurring items are waiting for you to confirm" },
+      { text: ": " },
+      { amount: egp(900) },
+      { text: " of expenses" },
+      { text: " and " },
+      { amount: egp(5_000) },
+      { text: " of income" },
+      { text: "." },
+    ]);
+    const [incomeOnly] = buildInsights(quiet({ pending: { count: 1, expense: 0, income: egp(5_000) } }));
+    expect(incomeOnly.impact).toBe(0);
+    expect(incomeOnly.text).toEqual([
+      { text: "1 recurring item is waiting for you to confirm" },
+      { text: ": " },
+      { amount: egp(5_000) },
+      { text: " of income" },
+      { text: "." },
+    ]);
   });
 });
 
@@ -287,7 +311,7 @@ describe("ranking and the top 5", () => {
         mix: mix({ stocks: egp(50), gold: 0, clouds: 0, cash: egp(50) }),
         budgets: [{ id: "food", name: "Food", status: { level: "over", budget: egp(1_000), spent: egp(1_700), percentUsed: 1.7, projected: egp(2_000) } }],
         stale: { count: 2, value: egp(40_000) },
-        pending: { count: 1, total: egp(250) },
+        pending: { count: 1, expense: egp(250), income: 0 },
       }),
     );
 
@@ -333,7 +357,7 @@ describe("privacy: an amount is never plain text", () => {
         mix: mix({ stocks: egp(50), gold: 0, clouds: 0, cash: egp(50) }),
         budgets: [{ id: "f", name: "Food", status: { level: "over", budget: egp(1_000), spent: egp(1_700), percentUsed: 1.7, projected: egp(2_000) } }],
         stale: { count: 1, value: egp(100) },
-        pending: { count: 1, total: egp(100) },
+        pending: { count: 1, expense: egp(100), income: 0 },
       }),
     );
     expect(new Set(kinds(all)).size).toBeGreaterThanOrEqual(8);

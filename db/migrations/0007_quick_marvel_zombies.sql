@@ -1,0 +1,2 @@
+ALTER TABLE "user_settings" ADD COLUMN "auto_lock_minutes" integer DEFAULT 5;--> statement-breakpoint
+ALTER TABLE "user_settings" ADD CONSTRAINT "user_settings_auto_lock_minutes_range" CHECK (auto_lock_minutes is null or auto_lock_minutes between 1 and 120);

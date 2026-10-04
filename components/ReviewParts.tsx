@@ -46,12 +46,10 @@ export function ReviewLine({
   children: ReactNode;
 }) {
   return (
-    <div className={`py-3 ${indent ? "pl-4" : ""}`}>
-      <div className="flex items-baseline justify-between gap-3">
-        <dt className={strong ? "font-semibold" : indent ? "text-sm text-muted" : ""}>{label}</dt>
-        <dd className={`shrink-0 ${strong ? "text-xl font-semibold tracking-tight" : "font-medium"}`}>{children}</dd>
-      </div>
-      {note && <p className="mt-1 text-sm text-muted">{note}</p>}
+    <div className={`grid grid-cols-[minmax(0,1fr)_auto] items-baseline gap-x-3 py-3 ${indent ? "pl-4" : ""}`}>
+      <dt className={strong ? "font-semibold" : indent ? "text-sm text-muted" : ""}>{label}</dt>
+      <dd className={strong ? "text-xl font-semibold tracking-tight" : "font-medium"}>{children}</dd>
+      {note && <dd className="col-span-2 mt-1 text-sm text-muted">{note}</dd>}
     </div>
   );
 }

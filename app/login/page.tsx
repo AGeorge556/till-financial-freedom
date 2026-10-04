@@ -1,13 +1,20 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useEffect } from "react";
 import { signIn, type LoginState } from "./actions";
 
-const field =
-  "mt-2 block w-full rounded-xl border border-border bg-surface px-4 py-3 text-lg outline-none focus-visible:ring-2 focus-visible:ring-foreground";
+const field = "mt-2 block w-full rounded-xl border border-control bg-surface px-4 py-3 text-lg";
 
 export default function LoginPage() {
   const [state, action, pending] = useActionState<LoginState, FormData>(signIn, {});
+
+  // Reaching this page means the session is over, however it ended. Forget the auto-lock idle timestamp here so a
+  // stale one can never lock the next sign-in at once (same key as components/AutoLock.tsx).
+  useEffect(() => {
+    try {
+      localStorage.removeItem("till:lastActive");
+    } catch {}
+  }, []);
 
   return (
     <main className="mx-auto flex min-h-dvh max-w-sm flex-col justify-center px-5 pb-[env(safe-area-inset-bottom)]">
@@ -18,7 +25,18 @@ export default function LoginPage() {
         <label htmlFor="email" className="text-sm text-muted">
           Email
         </label>
-        <input id="email" name="email" type="email" autoComplete="username" required className={field} />
+        <input
+          id="email"
+          name="email"
+          type="email"
+          autoComplete="username"
+          autoCapitalize="none"
+          spellCheck={false}
+          required
+          aria-invalid={state.error ? true : undefined}
+          aria-describedby={state.error ? "login-error" : undefined}
+          className={field}
+        />
 
         <label htmlFor="password" className="mt-4 block text-sm text-muted">
           Password
@@ -29,6 +47,8 @@ export default function LoginPage() {
           type="password"
           autoComplete="current-password"
           required
+          aria-invalid={state.error ? true : undefined}
+          aria-describedby={state.error ? "login-error" : undefined}
           className={field}
         />
 
@@ -39,13 +59,14 @@ export default function LoginPage() {
         >
           {pending ? "Signing in…" : "Sign in"}
         </button>
+        <span role="status" className="sr-only">
+          {pending ? "Signing in, please wait." : ""}
+        </span>
       </form>
 
-      {state.error && (
-        <p role="alert" className="mt-4 text-negative">
-          {state.error}
-        </p>
-      )}
+      <p id="login-error" role="alert" className={state.error ? "mt-4 text-negative" : "sr-only"}>
+        {state.error}
+      </p>
     </main>
   );
 }

@@ -63,11 +63,14 @@ export function QuickAdd({
           setOpen(true);
         }}
         aria-label="Add transaction"
-        className="fixed right-4 bottom-[calc(4.5rem+env(safe-area-inset-bottom))] z-30 grid size-14 place-items-center rounded-full bg-foreground text-background shadow-lg md:right-8 md:bottom-8"
+        aria-haspopup="dialog"
+        // Smallest comfortable target (48px), tucked into the corner just above the tab bar (3.5rem). The layout's bottom
+        // padding keeps the last row of every page clear of it: the button's top edge is 7rem up, the padding is 9rem.
+        className="fixed right-3 bottom-[calc(4rem+env(safe-area-inset-bottom))] z-30 grid size-12 place-items-center rounded-full bg-foreground text-background shadow-lg md:right-8 md:bottom-8"
       >
         <svg
           viewBox="0 0 24 24"
-          className="size-7"
+          className="size-6"
           fill="none"
           stroke="currentColor"
           strokeWidth="2"
@@ -79,7 +82,7 @@ export function QuickAdd({
       </button>
 
       <Sheet open={open} onClose={close} label="Add transaction">
-        <div className="mr-11 grid grid-cols-6 gap-1 rounded-xl bg-background p-1">
+        <div role="group" aria-label="What to record" className="mr-11 grid grid-cols-6 gap-1 rounded-xl bg-background p-1">
           {tabs.map((t) => (
             <button
               key={t.tab}
@@ -138,7 +141,7 @@ export function QuickAdd({
                     </select>
                   </Field>
                 )}
-                <div className="mb-5 flex gap-1 rounded-xl bg-background p-1">
+                <div role="group" aria-label="Buy or sell" className="mb-5 flex gap-1 rounded-xl bg-background p-1">
                   {(["buy", "sell"] as const).map((sd) => (
                     <button
                       key={sd}

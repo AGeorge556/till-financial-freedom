@@ -198,7 +198,7 @@ export function TradeForm({
             <input type="date" name="date" required defaultValue={today} className={field} />
           </Field>
           <Field label="Note (optional, no amounts)" className="mt-4">
-            <input name="note" maxLength={500} value={note} onChange={(e) => setNote(e.target.value)} className={field} />
+            <input name="note" autoComplete="off" maxLength={500} value={note} onChange={(e) => setNote(e.target.value)} className={field} />
           </Field>
           <button type="submit" disabled={pending} className={`mt-6 ${primaryBtn}`}>
             {pending ? "Saving…" : buy ? "Record purchase" : "Record sale"}
@@ -262,7 +262,7 @@ export function DividendForm({ holdingId, accountId, accounts, today }: { holdin
             <input type="date" name="date" required defaultValue={today} className={field} />
           </Field>
           <Field label="Note (optional, no amounts)" className="mt-4">
-            <input name="note" maxLength={500} value={note} onChange={(e) => setNote(e.target.value)} className={field} />
+            <input name="note" autoComplete="off" maxLength={500} value={note} onChange={(e) => setNote(e.target.value)} className={field} />
           </Field>
           <button type="submit" disabled={pending} className={`mt-6 ${primaryBtn}`}>
             {pending ? "Saving…" : "Record dividend"}
@@ -363,7 +363,7 @@ export function CorporateActionForm({ holdingId, today, writeOffOnly }: { holdin
             <input type="date" name="date" required defaultValue={today} className={field} />
           </Field>
           <Field label="Note (optional, no amounts)" className="mt-4">
-            <input name="note" maxLength={500} className={field} />
+            <input name="note" autoComplete="off" maxLength={500} className={field} />
           </Field>
           <button type="submit" disabled={pending} className={`mt-6 ${primaryBtn}`}>
             {pending ? "Saving…" : "Record"}
@@ -457,7 +457,7 @@ export function AddHoldingForm({ accounts, today }: { accounts: { id: string; na
             </select>
           </Field>
           <Field label="Notes (optional, no amounts)" className="mt-4">
-            <input name="notes" maxLength={1000} className={field} />
+            <input name="notes" autoComplete="off" maxLength={1000} className={field} />
           </Field>
           <button type="submit" disabled={pending} className={`mt-6 ${primaryBtn}`}>
             {pending ? "Adding…" : "Add holding"}
@@ -477,15 +477,15 @@ export function HoldingEditForm({ id, name, ticker, notes }: { id: string; name:
         <>
           <input type="hidden" name="id" value={id} />
           <Field label="Name">
-            <input name="name" required maxLength={80} defaultValue={name} className={field} />
+            <input name="name" autoComplete="off" required maxLength={80} defaultValue={name} className={field} />
           </Field>
           {ticker !== undefined && (
             <Field label="Ticker (optional)" className="mt-4">
-              <input name="ticker" maxLength={20} defaultValue={ticker ?? ""} className={field} />
+              <input name="ticker" autoComplete="off" maxLength={20} defaultValue={ticker ?? ""} className={field} />
             </Field>
           )}
           <Field label="Notes (optional, no amounts)" className="mt-4">
-            <input name="notes" maxLength={1000} defaultValue={notes ?? ""} className={field} />
+            <input name="notes" autoComplete="off" maxLength={1000} defaultValue={notes ?? ""} className={field} />
           </Field>
           <p className="mt-2 text-sm text-muted">Notes show even when amounts are hidden, so keep numbers out of them.</p>
           <button type="submit" disabled={pending} className={`mt-5 ${primaryBtn}`}>
@@ -505,7 +505,7 @@ export function HoldingArchiveButton({ id, archived, canArchive }: { id: string;
         <>
           <input type="hidden" name="id" value={id} />
           <button type="submit" disabled={pending || (!archived && !canArchive)} className={`w-full ${secondaryBtn}`}>
-            {archived ? "Restore holding" : "Archive holding"}
+            {pending ? "Saving…" : archived ? "Restore holding" : "Archive holding"}
           </button>
         </>
       )}
@@ -513,7 +513,8 @@ export function HoldingArchiveButton({ id, archived, canArchive }: { id: string;
   );
 }
 
-export function HoldingVoidButton({ id }: { id: string }) {
+/** `what` names the entry ("buy of 3 Jan") so the Void buttons of a history list can be told apart. */
+export function HoldingVoidButton({ id, what }: { id: string; what: string }) {
   return (
     <Form action={voidInvestmentTransaction} confirm="Void this? It stays in your history but stops counting, and your cash balance is corrected.">
       {({ pending }) => (
@@ -521,6 +522,7 @@ export function HoldingVoidButton({ id }: { id: string }) {
           <input type="hidden" name="id" value={id} />
           <button type="submit" disabled={pending} className="min-h-11 rounded-xl px-3 text-sm font-medium text-negative disabled:opacity-60">
             {pending ? "Voiding…" : "Void"}
+            <span className="sr-only"> {what}</span>
           </button>
         </>
       )}

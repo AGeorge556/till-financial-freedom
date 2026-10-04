@@ -41,6 +41,23 @@ export function PrivacyProvider({ children }: { children: ReactNode }) {
 
 export const usePrivacy = () => useContext(PrivacyContext);
 
+const BOOT = `try{if(localStorage.getItem("${PRIVACY_KEY}")==="on")document.documentElement.setAttribute("data-privacy-boot","")}catch(e){}`;
+
+/**
+ * Runs while the browser parses the page, before first paint, so amounts never flash when privacy mode is on
+ * (app/globals.css hides them while html has data-privacy-boot). Rendered by React as text/plain so React does not warn
+ * about a script tag; the server-rendered text/javascript copy has already run, and suppressHydrationWarning keeps the DOM as is.
+ */
+export function PrivacyBootScript() {
+  return (
+    <script
+      type={typeof window === "undefined" ? "text/javascript" : "text/plain"}
+      suppressHydrationWarning
+      dangerouslySetInnerHTML={{ __html: BOOT }}
+    />
+  );
+}
+
 export function PrivacyToggle() {
   const { hidden: isHidden, toggle: flip } = usePrivacy();
   return (

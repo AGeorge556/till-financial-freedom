@@ -27,6 +27,26 @@ export function spendingBy(txs: CategorizedTx[], key: "category" | "account"): {
     .sort((a, b) => b.total - a.total);
 }
 
+/**
+ * Posted earned income (INCOME rows, not dividends or interest) grouped by category, largest first. `share` is the group's
+ * part of the earned total (0 to 1). A missing category is null.
+ */
+export function incomeByCategory(txs: CategorizedTx[]): { key: string | null; total: Piasters; share: number }[] {
+  const groups = new Map<string | null, CategorizedTx[]>();
+  for (const t of txs) {
+    const k = t.categoryId ?? null;
+    groups.set(k, [...(groups.get(k) ?? []), t]);
+  }
+  const all = periodSummary(txs).earnedIncome;
+  return [...groups]
+    .map(([k, group]) => {
+      const total = periodSummary(group).earnedIncome;
+      return { key: k, total, share: total / all };
+    })
+    .filter((g) => g.total > 0)
+    .sort((a, b) => b.total - a.total);
+}
+
 export function monthTotals(txs: Tx[], months: Range[]): (Range & { spending: Piasters; income: Piasters; savings: Piasters })[] {
   return months.map((m) => {
     const s = periodSummary(filterByDateRange(txs, m.start, m.end));

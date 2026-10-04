@@ -31,7 +31,7 @@ export function TabBar() {
   return (
     <nav
       aria-label="Primary"
-      className="fixed inset-x-0 bottom-0 z-20 border-t border-border bg-surface pb-[env(safe-area-inset-bottom)] md:inset-y-0 md:right-auto md:w-60 md:border-t-0 md:border-r md:px-3 md:pt-[calc(1.5rem+env(safe-area-inset-top))] md:pb-6"
+      className="fixed inset-x-0 bottom-0 z-20 border-t border-border bg-surface pb-[env(safe-area-inset-bottom)] md:inset-y-0 md:right-auto md:w-60 md:border-t-0 md:border-r md:px-3 md:pt-[calc(1.5rem+env(safe-area-inset-top))] md:pb-6 md:pl-[max(0.75rem,env(safe-area-inset-left))]"
     >
       <p className="mb-6 hidden px-3 text-lg font-semibold tracking-tight md:block">Till</p>
       <ul className="grid grid-cols-5 md:flex md:flex-col md:gap-1">
@@ -42,7 +42,7 @@ export function TabBar() {
               <Link
                 href={href}
                 aria-current={active ? "page" : undefined}
-                className={`relative flex min-h-14 flex-col items-center justify-center gap-0.5 text-xs md:min-h-11 md:flex-row md:justify-start md:gap-3 md:rounded-lg md:px-3 md:text-sm ${
+                className={`relative flex min-h-14 flex-col focus-visible:outline-offset-[-4px] items-center justify-center gap-0.5 text-xs md:min-h-11 md:flex-row md:justify-start md:gap-3 md:rounded-lg md:px-3 md:text-sm ${
                   active ? `${color} font-semibold md:bg-background` : "text-muted hover:text-foreground"
                 }`}
               >

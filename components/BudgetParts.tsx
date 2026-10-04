@@ -37,7 +37,7 @@ export function BudgetCard({ name, status, ongoing, heading = "h3" }: { name: st
   return (
     <div className={`p-4 ${card}`}>
       <div className="flex items-baseline justify-between gap-3">
-        <Heading className="min-w-0 truncate font-semibold tracking-tight">{name}</Heading>
+        <Heading dir="auto" className="min-w-0 break-words font-semibold tracking-tight">{name}</Heading>
         <span className={`shrink-0 text-sm font-medium ${s.tone}`}>{s.text}</span>
       </div>
       <p className="mt-2">

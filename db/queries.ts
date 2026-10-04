@@ -1,5 +1,6 @@
 import "server-only";
 import { and, asc, desc, eq, gte, isNotNull, isNull, lte, min } from "drizzle-orm";
+import { cache } from "react";
 import type { GoalData } from "@/app/(app)/goals/data";
 import type { BudgetLine } from "@/app/(app)/spending/data";
 import type { SavingsTargetMode } from "@/lib/finance-core/allocation";
@@ -12,7 +13,7 @@ import {
 } from "@/lib/finance-core/analytics";
 import { DEFAULT_BUDGET_ALERT_AT, DEFAULT_BUDGET_WARN_AT } from "@/lib/finance-core/budget";
 import { type HistoryData, type HistoryPoint, MAX_POINTS, seriesFromSnapshots, snapshotsAsOf } from "@/lib/finance-core/history";
-import type { InsightInput } from "@/lib/finance-core/insights";
+import type { InsightInput, PendingRecurring } from "@/lib/finance-core/insights";
 import { accountBalance, filterByDateRange, netWorth, periodSummary, type Tx } from "@/lib/finance-core/ledger";
 import type { Piasters } from "@/lib/finance-core/money";
 import {
@@ -36,6 +37,7 @@ import { eventsByHolding, type LedgerEvent, toHoldingEvents } from "@/lib/backup
 import { db } from "./index";
 import {
   accounts,
+  DEFAULT_AUTO_LOCK_MINUTES,
   allocationOverrides,
   allocationRules,
   budgets,
@@ -62,54 +64,82 @@ export type TransactionRow = typeof transactions.$inferSelect;
 
 // Every query takes userId: the Drizzle connection bypasses row-level security.
 
-export function listAccounts(userId: string, options: { includeArchived?: boolean } = {}) {
-  return db
-    .select()
-    .from(accounts)
-    .where(and(eq(accounts.userId, userId), options.includeArchived ? undefined : isNull(accounts.archivedAt)))
-    .orderBy(asc(accounts.createdAt), asc(accounts.name));
+/**
+ * Runs a read loader once per server render: the same arguments share one query however many layouts, pages and
+ * loaders ask for it. Outside a render (server actions, route handlers) cache() does nothing, so a write is never
+ * followed by a stale read. Arguments must be JSON-able (no transaction handle), and the shared result must not be mutated.
+ */
+function perRequest<A extends unknown[], R>(load: (...args: A) => PromiseLike<R>): (...args: A) => Promise<R> {
+  const perRender = cache(() => new Map<string, Promise<R>>());
+  return (...args) => {
+    const shared = perRender();
+    const key = JSON.stringify(args);
+    let result = shared.get(key);
+    // Promise.resolve: a Drizzle query is a thenable that would run again on every await.
+    if (!result) shared.set(key, (result = Promise.resolve(load(...args))));
+    return result;
+  };
 }
 
-export function listCategories(userId: string, options: { includeArchived?: boolean } = {}) {
-  return db
-    .select()
-    .from(categories)
-    .where(and(eq(categories.userId, userId), options.includeArchived ? undefined : isNull(categories.archivedAt)))
-    .orderBy(asc(categories.kind), asc(categories.name));
+// The archived-or-not variants read the same rows and filter, so the layout and a page share one query.
+const allAccounts = perRequest((userId: string) =>
+  db.select().from(accounts).where(eq(accounts.userId, userId)).orderBy(asc(accounts.createdAt), asc(accounts.name)),
+);
+
+export async function listAccounts(userId: string, options: { includeArchived?: boolean } = {}) {
+  const rows = await allAccounts(userId);
+  return options.includeArchived ? rows : rows.filter((a) => a.archivedAt === null);
 }
 
-/** Newest first. Includes void rows (status 'void'); the ledger engine ignores them, a list view should hide them. */
-export function listTransactions(userId: string, range?: { from: string; to: string }) {
-  return db
+const allCategories = perRequest((userId: string) =>
+  db.select().from(categories).where(eq(categories.userId, userId)).orderBy(asc(categories.kind), asc(categories.name)),
+);
+
+export async function listCategories(userId: string, options: { includeArchived?: boolean } = {}) {
+  const rows = await allCategories(userId);
+  return options.includeArchived ? rows : rows.filter((c) => c.archivedAt === null);
+}
+
+const transactionsBetween = perRequest((userId: string, from?: string, to?: string) =>
+  db
     .select()
     .from(transactions)
     .where(
       and(
         eq(transactions.userId, userId),
-        range ? gte(transactions.date, range.from) : undefined,
-        range ? lte(transactions.date, range.to) : undefined,
+        from ? gte(transactions.date, from) : undefined,
+        to ? lte(transactions.date, to) : undefined,
       ),
     )
-    .orderBy(desc(transactions.date), desc(transactions.createdAt));
+    .orderBy(desc(transactions.date), desc(transactions.createdAt)),
+);
+
+/** Newest first. Includes void rows (status 'void'); the ledger engine ignores them, a list view should hide them. */
+export function listTransactions(userId: string, range?: { from: string; to: string }) {
+  return transactionsBetween(userId, range?.from, range?.to);
 }
 
-export async function getSettings(
-  userId: string,
-): Promise<{ monthStartDay: number; goldPriceMode: GoldPriceMode; staleDaysGold: number; staleDaysClouds: number }> {
-  const [row] = await db
-    .select({
-      monthStartDay: userSettings.monthStartDay,
-      goldPriceMode: userSettings.goldPriceMode,
-      staleDaysGold: userSettings.staleDaysGold,
-      staleDaysClouds: userSettings.staleDaysClouds,
-    })
-    .from(userSettings)
-    .where(eq(userSettings.userId, userId));
+/** The user's settings row (undefined until they save one): one read per render for every getter below. */
+const settingsRow = perRequest(async (userId: string) => {
+  const [row] = await db.select().from(userSettings).where(eq(userSettings.userId, userId));
+  return row;
+});
+
+export async function getSettings(userId: string): Promise<{
+  monthStartDay: number;
+  goldPriceMode: GoldPriceMode;
+  staleDaysGold: number;
+  staleDaysClouds: number;
+  /** Minutes of inactivity before auto-lock; null = off. */
+  autoLockMinutes: number | null;
+}> {
+  const row = await settingsRow(userId);
   return {
     monthStartDay: row?.monthStartDay ?? 1,
     goldPriceMode: row?.goldPriceMode ?? "derive_24k",
     staleDaysGold: row?.staleDaysGold ?? DEFAULT_STALE_DAYS_GOLD,
     staleDaysClouds: row?.staleDaysClouds ?? DEFAULT_STALE_DAYS_CLOUDS,
+    autoLockMinutes: row ? row.autoLockMinutes : DEFAULT_AUTO_LOCK_MINUTES,
   };
 }
 
@@ -229,7 +259,7 @@ export function listOverrides(userId: string, month?: string): Promise<OverrideR
 }
 
 export async function getPlanSettings(userId: string): Promise<PlanSettings> {
-  const [row] = await db.select().from(userSettings).where(eq(userSettings.userId, userId));
+  const row = await settingsRow(userId);
   return {
     savingsTargetMode: row?.savingsTargetMode ?? "flexible",
     savingsTargetAmount: row?.savingsTargetAmount ?? null,
@@ -298,12 +328,13 @@ export type PortfolioData = {
   confirmations: CloudConfirmationEntry[];
 };
 
-export function listHoldings(userId: string, options: { includeArchived?: boolean } = {}): Promise<HoldingRow[]> {
-  return db
-    .select()
-    .from(holdings)
-    .where(and(eq(holdings.userId, userId), options.includeArchived ? undefined : isNull(holdings.archivedAt)))
-    .orderBy(asc(holdings.name), asc(holdings.createdAt));
+const allHoldings = perRequest((userId: string) =>
+  db.select().from(holdings).where(eq(holdings.userId, userId)).orderBy(asc(holdings.name), asc(holdings.createdAt)),
+);
+
+export async function listHoldings(userId: string, options: { includeArchived?: boolean } = {}): Promise<HoldingRow[]> {
+  const rows = await allHoldings(userId);
+  return options.includeArchived ? rows : rows.filter((h) => h.archivedAt === null);
 }
 
 export async function getHolding(userId: string, holdingId: string): Promise<HoldingRow | undefined> {
@@ -381,15 +412,15 @@ export function listCorporateActions(userId: string) {
 }
 
 export async function getStaleDays(userId: string): Promise<number> {
-  const [row] = await db
-    .select({ days: userSettings.staleDaysHoldings })
-    .from(userSettings)
-    .where(eq(userSettings.userId, userId));
-  return row?.days ?? DEFAULT_STALE_DAYS;
+  return (await settingsRow(userId))?.staleDaysHoldings ?? DEFAULT_STALE_DAYS;
 }
 
 export async function getWealthSettings(userId: string, executor: Executor = db): Promise<WealthSettings> {
-  const [row] = await executor.select().from(userSettings).where(eq(userSettings.userId, userId));
+  // A transaction handle must read through its own transaction; only the plain connection shares the per-render read.
+  const row =
+    executor === db
+      ? await settingsRow(userId)
+      : (await executor.select().from(userSettings).where(eq(userSettings.userId, userId)))[0];
   return {
     staleDaysHoldings: row?.staleDaysHoldings ?? DEFAULT_STALE_DAYS,
     goldPriceMode: row?.goldPriceMode ?? "derive_24k",
@@ -688,7 +719,11 @@ export type WealthData = {
  * Everything Home and the goal loader need about holdings, clouds, gold and liabilities, in twelve queries
  * however many rows there are. Net worth = cash + `valuation.total` - `liabilitiesTotal`.
  */
-export async function loadWealth(userId: string, today: string = cairoToday()): Promise<WealthData> {
+export function loadWealth(userId: string, today: string = cairoToday()): Promise<WealthData> {
+  return wealthOnce(userId, today);
+}
+
+const wealthOnce = perRequest(async (userId: string, today: string): Promise<WealthData> => {
   const [portfolio, liabilityRows, updates, liabilityTxs, holdingShares] = await Promise.all([
     loadPortfolio(userId),
     listLiabilities(userId, { includeArchived: true }),
@@ -722,7 +757,7 @@ export async function loadWealth(userId: string, today: string = cairoToday()): 
     holdingShares,
     freeShares,
   };
-}
+});
 
 // ---- Phase 5a: budgets, recurring items, month and net worth loaders, backup rows ----
 
@@ -753,23 +788,20 @@ export function listRecurringTemplates(
 }
 
 /** Generated rows waiting for a confirm or skip, oldest first. Their note is the template's name. */
-export function listPendingRecurring(userId: string): Promise<TransactionRow[]> {
-  return db
+export const listPendingRecurring = perRequest((userId: string): Promise<TransactionRow[]> =>
+  db
     .select()
     .from(transactions)
     .where(and(eq(transactions.userId, userId), eq(transactions.status, "pending"), isNotNull(transactions.recurringTemplateId)))
-    .orderBy(asc(transactions.date), asc(transactions.createdAt));
-}
+    .orderBy(asc(transactions.date), asc(transactions.createdAt)),
+);
 
 /** Budget warning thresholds as decimals (0.8 = 80% of a budget spent), defaults until the user sets them. */
 export async function getBudgetThresholds(userId: string): Promise<{ warnAt: number; alertAt: number }> {
-  const [row] = await db
-    .select({ warnAt: userSettings.budgetWarnAt, alertAt: userSettings.budgetAlertAt })
-    .from(userSettings)
-    .where(eq(userSettings.userId, userId));
+  const row = await settingsRow(userId);
   return {
-    warnAt: row ? Number(row.warnAt) : DEFAULT_BUDGET_WARN_AT,
-    alertAt: row ? Number(row.alertAt) : DEFAULT_BUDGET_ALERT_AT,
+    warnAt: row ? Number(row.budgetWarnAt) : DEFAULT_BUDGET_WARN_AT,
+    alertAt: row ? Number(row.budgetAlertAt) : DEFAULT_BUDGET_ALERT_AT,
   };
 }
 
@@ -1063,23 +1095,7 @@ export async function loadBackupRows(userId: string) {
 
 /** The settings columns phase 5b added, flat and in the shape the backup stores them. */
 async function readInsightSettings(userId: string) {
-  const [row] = await db
-    .select({
-      targetStocks: userSettings.targetStocks,
-      targetGold: userSettings.targetGold,
-      targetClouds: userSettings.targetClouds,
-      targetCash: userSettings.targetCash,
-      insightMinPercent: userSettings.insightMinPercent,
-      insightMinAmount: userSettings.insightMinAmount,
-      remindReview: userSettings.remindReview,
-      remindRecurring: userSettings.remindRecurring,
-      remindStale: userSettings.remindStale,
-      remindGoal: userSettings.remindGoal,
-      remindBudget: userSettings.remindBudget,
-      remindSavings: userSettings.remindSavings,
-    })
-    .from(userSettings)
-    .where(eq(userSettings.userId, userId));
+  const row = await settingsRow(userId);
   return {
     targetStocks: rateOrNull(row?.targetStocks ?? null),
     targetGold: rateOrNull(row?.targetGold ?? null),
@@ -1202,6 +1218,12 @@ export type PlanningContext = {
 
 const activeGoals = (goalData: GoalData) => goalData.goals.filter((v) => !v.goal.archivedAt);
 
+/** Waiting recurring rows: how many, and what they come to as expenses and as income (pending rows are only ever those two). */
+function pendingTotals(rows: TransactionRow[]): PendingRecurring {
+  const total = (type: "EXPENSE" | "INCOME") => sumOf(rows.filter((r) => r.type === type).map((r) => r.amount));
+  return { count: rows.length, expense: total("EXPENSE"), income: total("INCOME") };
+}
+
 /** Everything buildInsights needs. Its own reads are the settings, categories, pending items and whatever the context lacks. */
 export async function loadInsightInput(userId: string, ctx: PlanningContext): Promise<InsightInput> {
   const { goalData } = ctx;
@@ -1250,7 +1272,7 @@ export async function loadInsightInput(userId: string, ctx: PlanningContext): Pr
     mix: mix(values),
     budgets: ctx.budgets.map((b) => ({ id: b.id, name: b.categoryId ? b.name : "overall", status: b.status })),
     stale: staleOf(wealth.valuation),
-    pending: { count: pendingRows.length, total: sumOf(pendingRows.map((r) => r.amount)) },
+    pending: pendingTotals(pendingRows),
   };
 }
 
@@ -1271,7 +1293,7 @@ export async function loadReminderInput(userId: string, ctx: PlanningContext): P
   return {
     month,
     previousMonthHasData: txRows.some((r) => r.status === "posted" && r.date >= previous.start && r.date <= previous.end),
-    pendingRecurring: { count: pendingRows.length, total: sumOf(pendingRows.map((r) => r.amount)) },
+    pendingRecurring: pendingTotals(pendingRows),
     staleCount: staleOf(wealth.valuation).count,
     goals: activeGoals(goalData).map((v) => ({ id: v.goal.id, name: v.goal.name, planned: v.planned, actual: v.actual })),
     budgets: ctx.budgets.map((b) => ({ id: b.id, name: b.categoryId ? b.name : "overall", status: b.status })),
@@ -1344,7 +1366,6 @@ export async function loadScenarioDefaults(
     monthlyInvestment: invested.kind === "average" ? Math.max(0, invested.value) : 0,
     returns: { stocks: assumed.stocks ?? 0, gold: assumed.gold ?? 0, clouds: assumed.clouds ?? 0, cash: assumed.cash ?? 0 },
     startValues: values,
-    investSplit: null,
     liabilities: wealth.liabilitiesTotal + cardDebt,
     years: 10,
     inflation: assumptions.inflation,
